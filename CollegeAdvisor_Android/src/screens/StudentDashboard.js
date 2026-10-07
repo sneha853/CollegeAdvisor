@@ -1,0 +1,1166 @@
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import {
+    View, Text, StyleSheet, TouchableOpacity, ScrollView,
+    Dimensions, FlatList, Image, ActivityIndicator, Platform, useWindowDimensions
+} from 'react-native';
+import { useFocusEffect } from '@react-navigation/native';
+import MainLayout from '../components/layouts/MainLayout';
+import { Colors, Shadows } from '../constants/theme';
+import { useAuth } from '../contexts/AuthContext';
+import {
+    Search, LayoutGrid, Cpu, MapPin,
+    MessageSquare, Bookmark, GraduationCap, TrendingUp, Star, Settings, Bot, Info, Pencil, Target, Crown, Sparkles, Zap, Lock, ChevronRight, Layers
+} from 'lucide-react-native';
+import { SUBSCRIPTION_PLANS } from '../constants/subscriptions';
+import { institutionAPI } from '../services/api';
+import VerificationBanner from '../components/ui/VerificationBanner';
+import VerificationModal from '../components/ui/VerificationModal';
+import RatingSection from '../components/ui/RatingSection';
+import TestimonialSlider from '../components/ui/TestimonialSlider';
+import { LinearGradient } from 'expo-linear-gradient';
+import SubscriptionPopup from '../components/ui/SubscriptionPopup';
+import { videoAPI, optionFormAPI } from '../services/api';
+import YoutubePlayer from 'react-native-youtube-iframe';
+import { PlayCircle, X, Youtube } from 'lucide-react-native';
+import { Modal as RNModal } from 'react-native';
+
+const PRESET_COLORS = [
+    { border: '#3b82f6', bg: '#eff6ff', text: '#1d4ed8' },
+    { border: '#10b981', bg: '#ecfdf5', text: '#047857' },
+    { border: '#f59e0b', bg: '#fffbeb', text: '#b45309' },
+    { border: '#8b5cf6', bg: '#f5f3ff', text: '#6d28d9' },
+    { border: '#ec4899', bg: '#fdf2f8', text: '#be185d' }
+];
+
+const StudentDashboard = ({ navigation }) => {
+    const { width: windowWidth } = useWindowDimensions();
+    const isDesktop = Platform.OS === 'web' && windowWidth > 768;
+    const SCREEN_WIDTH = isDesktop ? Math.min(windowWidth, 1200) : windowWidth;
+    const SLIDER_WIDTH = SCREEN_WIDTH - 32;
+    const CARD_WIDTH = isDesktop ? (SCREEN_WIDTH - 32 - 36) / 4 : (SCREEN_WIDTH - 32 - 12 - 4) / 2;
+    const FEATURED_CARD_WIDTH = isDesktop ? (SCREEN_WIDTH - 32 - 48) / 4 : SLIDER_WIDTH - 20;
+    useFocusEffect(
+        useCallback(() => {
+            fetchFeatured();
+        }, [])
+    );
+
+    const { user, hasSkippedProfile, socket, refreshUser, admissionPath, setAdmissionPath, setSubscriptionModal } = useAuth();
+    const [featuredColleges, setFeaturedColleges] = useState([]);
+    const [loadingFeatured, setLoadingFeatured] = useState(true);
+    const [currentIndex, setCurrentIndex] = useState(0);
+    const [showVerificationModal, setShowVerificationModal] = useState(false);
+    const [showSubscriptionPopup, setShowSubscriptionPopup] = useState(false);
+    const [videos, setVideos] = useState([]);
+    const [selectedVideo, setSelectedVideo] = useState(null);
+    const [optionPresets, setOptionPresets] = useState([]);
+    const [loadingPresets, setLoadingPresets] = useState(true);
+    const [roundModalVisible, setRoundModalVisible] = useState(false);
+    const [selectedGroupedPreset, setSelectedGroupedPreset] = useState(null);
+    const flatListRef = React.useRef(null);
+    const pathScrollRef = React.useRef(null);
+
+    const ADMISSION_PATHS = ['MHTCET PCM', 'MHTCET PCB', 'BBA', 'NEET', 'JEE'];
+
+    useEffect(() => {
+        if (socket) {
+            const handleRefresh = () => fetchFeatured();
+            socket.on('institution:updated', handleRefresh);
+            socket.on('institution:created', handleRefresh);
+            socket.on('institution:deleted', handleRefresh);
+            return () => {
+                socket.off('institution:updated', handleRefresh);
+                socket.off('institution:created', handleRefresh);
+                socket.off('institution:deleted', handleRefresh);
+            };
+        }
+    }, [socket, admissionPath]);
+
+    // Removed WhatsApp verification popup trigger as per user request
+
+    const [hasShownSubscription, setHasShownSubscription] = useState(false);
+
+    useEffect(() => {
+        // Show subscription popup if user is a student and on Free plan
+        if (!hasShownSubscription && user?.role === 'student' && (!user?.subscription?.type || user.subscription.type.toUpperCase() === 'FREE')) {
+            const timer = setTimeout(() => {
+                setShowSubscriptionPopup(true);
+                setHasShownSubscription(true);
+            }, 2000); // Small delay for better UX
+            return () => clearTimeout(timer);
+        }
+    }, [user, hasShownSubscription]);
+
+    useEffect(() => {
+        if (user && user.role === 'student') {
+            let cleanPhone = (user.phoneNumber || '').replace(/\D/g, '');
+            if (cleanPhone.length > 10 && cleanPhone.startsWith('91')) {
+                cleanPhone = cleanPhone.slice(-10);
+            }
+            const phoneRegex = /^[6-9]\d{9}$/;
+            const hasEmptyField = !user.percentile || !user.percentile.toString().trim() ||
+                                  !user.rank || !user.rank.toString().trim() ||
+                                  !user.location || !user.location.trim() ||
+                                  !cleanPhone || !phoneRegex.test(cleanPhone) ||
+                                  !user.expectedRegion || !user.expectedRegion.trim();
+            if (hasEmptyField) {
+                navigation.navigate('CompleteProfile');
+            }
+        }
+    }, [user]);
+
+    const fetchPresets = async () => {
+        try {
+            setLoadingPresets(true);
+            const res = await optionFormAPI.getAll();
+            const sortedPresets = (res.data.data || []).sort((a, b) => Number(b.percentile) - Number(a.percentile));
+            setOptionPresets(sortedPresets);
+        } catch (error) {
+            console.error('Fetch option presets error:', error);
+        } finally {
+            setLoadingPresets(false);
+        }
+    };
+
+    const matchesExamType = (category, examType) => {
+        if (!category || !examType) return false;
+        const cat = category.toUpperCase().trim();
+        const type = examType.toUpperCase().trim();
+        
+        // Strict segregation between PCM and PCB
+        if (type.includes('PCM') && cat.includes('PCB')) return false;
+        if (type.includes('PCB') && cat.includes('PCM')) return false;
+
+        if (type === 'MHTCET PCM' || type === 'MHTCET-PCM') {
+            return cat === 'MHTCET PCM' || cat === 'ENGINEERING' || cat === 'MHTCET' || cat === 'MHTCET-PCM';
+        }
+        if (type === 'MHTCET PCB' || type === 'MHTCET-PCB') {
+            return cat === 'MHTCET PCB' || cat === 'PHARMACY' || cat === 'MHTCET-PCB';
+        }
+        return cat === type;
+    };
+
+    const displayPresets = useMemo(() => {
+        const filtered = optionPresets.filter(preset => {
+            // 1. Direct category match
+            if (matchesExamType(preset.category, admissionPath)) return true;
+            // 2. First college category match
+            const firstCollegeCat = preset.colleges?.[0]?.collegeId?.category;
+            if (firstCollegeCat && matchesExamType(firstCollegeCat, admissionPath)) return true;
+            return false;
+        });
+
+        // Group by percentile and category
+        const grouped = {};
+        filtered.forEach(preset => {
+            const key = `${preset.percentile}_${preset.category}`;
+            if (!grouped[key]) {
+                grouped[key] = {
+                    ...preset,
+                    availableRounds: []
+                };
+            }
+            if (preset.round && !grouped[key].availableRounds.includes(preset.round)) {
+                grouped[key].availableRounds.push(preset.round);
+            } else if (!preset.round && !grouped[key].availableRounds.includes(1)) {
+                grouped[key].availableRounds.push(1); // Default to round 1 if no round
+            }
+        });
+
+        return Object.values(grouped).sort((a, b) => Number(b.percentile) - Number(a.percentile));
+    }, [optionPresets, admissionPath]);
+
+    const handlePresetClick = (preset) => {
+        const isFree = !user?.subscription?.type || user.subscription.type.toUpperCase() === 'FREE';
+        if (isFree && user?.role === 'student') {
+            setSubscriptionModal({ visible: true, feature: 'predictions' });
+            return;
+        }
+        
+        setSelectedGroupedPreset(preset);
+        setRoundModalVisible(true);
+    };
+
+    const handleRoundSelect = (round) => {
+        setRoundModalVisible(false);
+        const specificPreset = optionPresets.find(p => 
+            p.percentile === selectedGroupedPreset.percentile && 
+            p.category === selectedGroupedPreset.category && 
+            (p.round === round || (!p.round && round === 1))
+        );
+        if (specificPreset) {
+            navigation.navigate('OptionFormView', { preset: specificPreset });
+        } else {
+            alert(`No list available for Round ${round} yet.`);
+        }
+    };
+
+    useFocusEffect(
+        useCallback(() => {
+            fetchFeatured();
+            fetchPresets();
+        }, [admissionPath])
+    );
+
+    useEffect(() => {
+        const index = ADMISSION_PATHS.indexOf(admissionPath);
+        if (index !== -1 && pathScrollRef.current) {
+            // Magnetic slide to the selected tag
+            const chipWidth = 100; // Average chip width with margin
+            pathScrollRef.current.scrollTo({
+                x: Math.max(0, (index * chipWidth) - (Dimensions.get('window').width / 2) + (chipWidth / 2)),
+                animated: true
+            });
+        }
+    }, [admissionPath]);
+
+    useEffect(() => {
+        if (!isDesktop && featuredColleges.length > 0) {
+            const timer = setInterval(() => {
+                let nextIndex = currentIndex + 1;
+                if (nextIndex >= featuredColleges.length) {
+                    nextIndex = 0;
+                }
+                setCurrentIndex(nextIndex);
+                flatListRef.current?.scrollToIndex({
+                    index: nextIndex,
+                    animated: true
+                });
+            }, 4500); // Increased to 4.5s for readability
+            return () => clearInterval(timer);
+        }
+    }, [currentIndex, featuredColleges, isDesktop]);
+
+    const fetchFeatured = async () => {
+        setLoadingFeatured(true);
+        try {
+            const res = await institutionAPI.getFeatured(admissionPath);
+            setFeaturedColleges(res.data);
+            setCurrentIndex(0); // Reset index on path change
+        } catch (error) {
+            console.error('Featured fetch error:', error);
+        } finally {
+            setLoadingFeatured(false);
+        }
+    };
+
+    const { logout } = useAuth();
+    const isAdmin = user?.role === 'admin';
+    const [stats, setStats] = useState({ savedColleges: 0, predictions: 0 });
+
+    useEffect(() => {
+        fetchVideos();
+    }, [admissionPath, user?.examType, user?.role]);
+
+    const fetchVideos = async () => {
+        try {
+            // Admin sees everything
+            if (isAdmin) {
+                const res = await videoAPI.getAll();
+                setVideos(res.data.data);
+                return;
+            }
+
+            // Prioritize current selected admissionPath pill, fallback to profile examType
+            const targetTag = admissionPath || user?.examType;
+
+            if (targetTag) {
+                const res = await videoAPI.getAll({ tag: targetTag });
+                setVideos(res.data.data);
+            } else {
+                setVideos([]);
+            }
+        } catch (error) {
+            console.error('Fetch dashboard videos error:', error);
+        }
+    };
+
+    const handleScroll = (event) => {
+        const slideSize = SLIDER_WIDTH - 20 + 16; // Card width + marginRight
+        const index = Math.floor(event.nativeEvent.contentOffset.x / slideSize);
+        if (index !== currentIndex) {
+            setCurrentIndex(index);
+        }
+    };
+
+    const getPathScore = () => {
+        // Check new multi-score map first
+        if (user?.scores && user.scores[admissionPath]) {
+            const s = user.scores[admissionPath];
+            return s.percentile ? `${s.percentile}%` : 'Not Set';
+        }
+
+        const matchesPath = (user?.examType === admissionPath) ||
+            (admissionPath === 'MHTCET PCM' && (user?.examType === 'MHTCET' || user?.examType === 'Engineering')) ||
+            (admissionPath === 'MHTCET PCB' && (user?.examType === 'Pharmacy'));
+
+        if (matchesPath) {
+            return user?.percentile ? `${user.percentile}%` : 'Not Set';
+        }
+        return 'Not Set';
+    };
+
+    const getPathRank = () => {
+        // Check new multi-score map first
+        if (user?.scores && user.scores[admissionPath]) {
+            const s = user.scores[admissionPath];
+            return s.rank || 'Not Set';
+        }
+
+        const matchesPath = (user?.examType === admissionPath) ||
+            (admissionPath === 'MHTCET PCM' && (user?.examType === 'MHTCET' || user?.examType === 'Engineering')) ||
+            (admissionPath === 'MHTCET PCB' && (user?.examType === 'Pharmacy'));
+
+        if (matchesPath) {
+            return user?.rank || 'Not Set';
+        }
+        return 'Not Set';
+    };
+
+    const quickStats = [
+        { label: `${admissionPath} Percentile`, value: getPathScore(), icon: TrendingUp, color: Colors.primary, isEditable: getPathScore() === 'Not Set' },
+        { label: `${admissionPath} Rank`, value: getPathRank(), icon: GraduationCap, color: '#10B981', isEditable: getPathRank() === 'Not Set' },
+        { label: 'Saved', value: user?.savedColleges?.length || 0, icon: Bookmark, color: '#F59E0B', route: 'BrowseColleges' },
+        { label: 'Settings', value: 'Manage', icon: Settings, color: '#8B5CF6', route: 'Settings' },
+    ];
+
+    const menuItems = [
+        { label: 'Browse Colleges', icon: Search, sub: 'Explore 500+ institutes', route: 'BrowseColleges' },
+        { label: 'College Predictor', icon: Target, sub: 'Check your chances', route: 'Predictor', highlight: true },
+        { label: 'Eta AI Counselor', icon: Bot, sub: '24/7 AI Guidance', route: 'AICounselor' },
+        { label: 'Nearby Colleges', icon: MapPin, sub: 'Find local institutes', route: 'NearbyColleges' },
+        { label: 'Connect Counselor', icon: MessageSquare, sub: 'Chat with experts', route: 'Counselors' },
+        { label: 'App Settings', icon: Settings, sub: 'Profile & Preferences', route: 'Settings' },
+    ];
+
+    const renderFeaturedCard = ({ item }) => {
+        const institutionImage = item.bannerUrl || (item.galleryImages && item.galleryImages.length > 0 ? item.galleryImages[0] : 'https://images.unsplash.com/photo-1541339907198-e08756eaa589?q=80&w=400');
+
+        return (
+            <TouchableOpacity
+                style={[styles.featuredCard, { width: FEATURED_CARD_WIDTH }]}
+                activeOpacity={0.9}
+                onPress={() => navigation.navigate('CollegeDetail', { id: item._id })}
+            >
+                <Image
+                    source={{ uri: institutionImage }}
+                    style={styles.featuredImage}
+                />
+                <View style={styles.imageOverlay} />
+                <View style={styles.featuredContent}>
+                    <View style={styles.featuredHeader}>
+                        <View style={styles.ratingBadge}>
+                            <Star size={10} color="#F59E0B" fill="#F59E0B" />
+                            <Text style={styles.ratingValue}>{item.rating?.value || '4.5'}</Text>
+                        </View>
+                    </View>
+                    <View style={styles.featuredFooter}>
+                        <Text style={styles.featuredName} numberOfLines={1}>{item.name}</Text>
+                        <View style={styles.featuredLocRow}>
+                            <MapPin size={10} color="rgba(255,255,255,0.8)" />
+                            <Text style={styles.featuredLocText}>{item.location?.city || 'Verified'}</Text>
+                        </View>
+                    </View>
+                </View>
+            </TouchableOpacity>
+        );
+    };
+
+    const StatCard = ({ item }) => {
+        const Icon = item.icon;
+        return (
+            <TouchableOpacity
+                style={[styles.statCard, { width: CARD_WIDTH }, item.isEditable && styles.statCardEditable]}
+                onPress={() => {
+                    if (item.isEditable) {
+                        navigation.navigate('Profile', { autoOpenEdit: true, admissionPath });
+                    } else if (item.route) {
+                        navigation.navigate(item.route);
+                    }
+                }}
+            >
+                <View style={[styles.statIcon, { backgroundColor: item.color + '15' }]}>
+                    <Icon size={20} color={item.color} />
+                </View>
+                <View style={{ flex: 1 }}>
+                    <Text style={styles.statVal} numberOfLines={1}>{item.value}</Text>
+                    <Text style={styles.statLab} numberOfLines={1}>{item.label}</Text>
+                </View>
+                {item.isEditable && (
+                    <View style={styles.editBadge}>
+                        <Pencil size={8} color={Colors.white} />
+                    </View>
+                )}
+            </TouchableOpacity>
+        );
+    };
+
+    const GridItem = ({ item }) => {
+        const Icon = item.icon;
+        return (
+            <TouchableOpacity
+                style={[styles.gridCard, { width: CARD_WIDTH }, item.highlight && styles.premiumGridCard]}
+                onPress={() => navigation.navigate(item.route)}
+                activeOpacity={0.7}
+            >
+                {item.highlight && <View style={styles.premiumBadge}><Text style={styles.premiumBadgeText}>PREMIUM</Text></View>}
+                <View style={[styles.gridIconBox, item.highlight && styles.premiumIconBox]}>
+                    <Icon size={24} color={Colors.primary} />
+                </View>
+                <Text style={styles.gridLabel}>{item.label}</Text>
+                <Text style={styles.gridSub}>{item.sub}</Text>
+            </TouchableOpacity>
+        );
+    };
+
+    return (
+        <MainLayout title="Dashboard" hideBack>
+            <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
+                <View style={[isDesktop && { maxWidth: 1200, width: '100%', alignSelf: 'center', paddingHorizontal: 16 }]}>
+                    <View style={[styles.welcomeSection, { marginBottom: 12 }]}>
+                        <Text style={styles.welcomeText}>Welcome back,</Text>
+                        <Text style={styles.nameText}>{user?.displayName} 👋</Text>
+                    </View>
+
+
+                    {/* Admission Path Selector */}
+                    <View style={styles.pathSelectorContainer}>
+                        <ScrollView
+                            ref={pathScrollRef}
+                            horizontal
+                            showsHorizontalScrollIndicator={false}
+                            contentContainerStyle={styles.pathList}
+                            decelerationRate="fast"
+                        >
+                            {ADMISSION_PATHS.map((path) => (
+                                <TouchableOpacity
+                                    key={path}
+                                    style={[styles.pathChip, admissionPath === path && styles.activePathChip]}
+                                    onPress={() => setAdmissionPath(path)}
+                                    activeOpacity={0.7}
+                                >
+                                    <Text style={[styles.pathText, admissionPath === path && styles.activePathText]}>
+                                        {path}
+                                    </Text>
+                                </TouchableOpacity>
+                            ))}
+                        </ScrollView>
+                    </View>
+
+                    {loadingFeatured ? (
+                        <View style={[styles.featuredSection, { height: 180, justifyContent: 'center' }]}>
+                            <ActivityIndicator size="small" color={Colors.primary} />
+                        </View>
+                    ) : featuredColleges.length > 0 ? (
+                        <View style={styles.featuredSection}>
+                            <View style={styles.sectionHeader}>
+                                <Text style={styles.sectionTitle}>{admissionPath} Trends</Text>
+                            </View>
+                            <FlatList
+                                ref={flatListRef}
+                                horizontal={true}
+                                data={featuredColleges}
+                                renderItem={renderFeaturedCard}
+                                keyExtractor={item => item._id}
+                                style={{ marginHorizontal: -16 }}
+                                showsHorizontalScrollIndicator={Platform.OS === 'web'}
+                                showsVerticalScrollIndicator={false}
+                                snapToInterval={isDesktop ? null : SLIDER_WIDTH - 20 + 16}
+                                snapToAlignment="start"
+                                onScroll={isDesktop ? null : handleScroll}
+                                scrollEventThrottle={16}
+                                decelerationRate="fast"
+                                contentContainerStyle={styles.featuredList}
+                                getItemLayout={isDesktop ? null : (data, index) => ({
+                                    length: SLIDER_WIDTH - 20 + 16,
+                                    offset: (SLIDER_WIDTH - 20 + 16) * index,
+                                    index,
+                                })}
+                            />
+                            {!isDesktop && (
+                                <View style={[styles.dotContainer, { alignSelf: 'center', marginTop: 12 }]}>
+                                    {featuredColleges.map((_, i) => (
+                                        <View
+                                            key={i}
+                                            style={[
+                                                styles.indicatorDot,
+                                                currentIndex === i && styles.activeDot
+                                            ]}
+                                        />
+                                    ))}
+                                </View>
+                            )}
+                        </View>
+                    ) : (
+                        <View style={styles.emptyFeatured}>
+                            <Info size={24} color={Colors.text.tertiary} />
+                            <Text style={styles.emptyFeaturedText}>No featured {admissionPath} colleges at the moment.</Text>
+                        </View>
+                    )}
+
+                    <View style={[styles.statsRow, isDesktop && { flexWrap: 'nowrap', justifyContent: 'space-between' }]}>
+                        {quickStats.map((s, i) => <StatCard key={i} item={s} />)}
+                    </View>
+
+                    {/* Subscription Status Card - Premium Feel */}
+                    <TouchableOpacity
+                        style={styles.premiumSubCard}
+                        onPress={() => navigation.navigate('Pricing')}
+                        activeOpacity={0.9}
+                    >
+                        <View style={styles.premiumSubInfo}>
+                            <View style={styles.premiumSubBadge}>
+                                <Crown size={12} color="#F59E0B" fill="#F59E0B" />
+                                <Text style={styles.premiumSubBadgeText}>
+                                    {(user?.subscription?.type || 'Free').toUpperCase()} PLAN
+                                </Text>
+                            </View>
+                            <Text style={styles.premiumSubTitle}>Your Admissions Power-Ups</Text>
+                            <Text style={styles.premiumSubDesc}>Keep track of your usage & limits</Text>
+                        </View>
+                        <View style={styles.premiumPerkContainer}>
+                            <View style={styles.premiumPerkItem}>
+                                <View style={[styles.premiumPerkIcon, { backgroundColor: '#F59E0B15' }]}>
+                                    <Zap size={14} color="#F59E0B" fill="#F59E0B" />
+                                </View>
+                                <View>
+                                    <Text style={styles.premiumPerkLabel}>AI Prompts</Text>
+                                    <Text style={styles.premiumPerkVal}>
+                                        {user?.role === 'admin' ? '∞/∞' : `${user?.subscription?.usage?.aiPrompts || 0}/${SUBSCRIPTION_PLANS[user?.subscription?.type?.toUpperCase() || 'FREE'].limits.aiPrompts === Infinity ? '∞' : SUBSCRIPTION_PLANS[user?.subscription?.type?.toUpperCase() || 'FREE'].limits.aiPrompts}`}
+                                    </Text>
+                                </View>
+                            </View>
+                            <View style={styles.premiumPerkItem}>
+                                <View style={[styles.premiumPerkIcon, { backgroundColor: '#8B5CF615' }]}>
+                                    <Target size={14} color="#8B5CF6" fill="#8B5CF6" />
+                                </View>
+                                <View>
+                                    <Text style={styles.premiumPerkLabel}>Predictions</Text>
+                                    <Text style={styles.premiumPerkVal}>
+                                        {user?.role === 'admin' ? '∞/∞' : `${user?.subscription?.usage?.predictions || 0}/${SUBSCRIPTION_PLANS[user?.subscription?.type?.toUpperCase() || 'FREE'].limits.predictions === Infinity ? '∞' : SUBSCRIPTION_PLANS[user?.subscription?.type?.toUpperCase() || 'FREE'].limits.predictions}`}
+                                    </Text>
+                                </View>
+                            </View>
+                        </View>
+                    </TouchableOpacity>
+
+                    {displayPresets.length > 0 && (
+                        <View style={styles.presetsSection}>
+                            <View style={styles.sectionHeader}>
+                                <Text style={styles.sectionTitle}>Best Option Form Lists</Text>
+                                <TouchableOpacity onPress={() => navigation.navigate('OptionFormList', { activePath: admissionPath })}>
+                                    <Text style={styles.seeAll}>View All</Text>
+                                </TouchableOpacity>
+                            </View>
+                            <ScrollView
+                                horizontal
+                                showsHorizontalScrollIndicator={Platform.OS === 'web'}
+                                style={{ marginHorizontal: -16 }}
+                                contentContainerStyle={styles.presetsScroll}
+                            >
+                                {displayPresets.map((preset, idx) => {
+                                    const colors = PRESET_COLORS[idx % PRESET_COLORS.length];
+                                    const isFree = !user?.subscription?.type || user.subscription.type.toUpperCase() === 'FREE';
+                                    const isLocked = isFree && user?.role === 'student';
+
+                                    return (
+                                        <TouchableOpacity
+                                            key={preset._id}
+                                            style={[styles.presetChip, isLocked && { opacity: 0.8 }]}
+                                            activeOpacity={0.8}
+                                            onPress={() => handlePresetClick(preset)}
+                                        >
+                                            <View style={[styles.presetCircle, { backgroundColor: isLocked ? '#F1F5F9' : colors.bg, borderColor: isLocked ? '#CBD5E1' : colors.border }]}>
+                                                {isLocked ? (
+                                                    <Lock size={24} color="#94A3B8" />
+                                                ) : (
+                                                    <>
+                                                        <Text style={[styles.presetPercentileText, { color: colors.text }]}>
+                                                            {Number(preset.percentile).toFixed(2)}
+                                                        </Text>
+                                                        <Text style={[styles.presetCirclePercentSign, { color: colors.text }]}>%ile</Text>
+                                                    </>
+                                                )}
+                                            </View>
+                                            <View style={styles.presetCategoryContainer}>
+                                                <Text style={[styles.presetCategoryText, { color: isLocked ? '#64748B' : colors.text }]}>
+                                                    {isLocked ? 'Premium Only' : preset.category}
+                                                </Text>
+                                            </View>
+                                        </TouchableOpacity>
+                                    );
+                                })}
+                            </ScrollView>
+                        </View>
+                    )}
+
+                    <View style={[styles.sectionHeader, { marginTop: 8 }]}>
+                        <Text style={styles.sectionTitle}>Counseling Tools</Text>
+                    </View>
+
+                    <View style={styles.grid}>
+                        {menuItems.map((item, index) => <GridItem key={index} item={item} />)}
+                    </View>
+
+                    <View style={styles.promoCard}>
+                        <View style={styles.promoInfo}>
+                            <Text style={styles.promoTitle}>Need Admission Help?</Text>
+                            <Text style={styles.promoSub}>Connect with senior counselors for direct guidance.</Text>
+                            <TouchableOpacity style={styles.promoBtn} onPress={() => navigation.navigate('Counselors')}>
+                                <Text style={styles.promoBtnText}>Contact Now</Text>
+                            </TouchableOpacity>
+                        </View>
+                        <GraduationCap size={60} color={Colors.white} style={styles.promoIcon} />
+                    </View>
+
+                    {videos.length > 0 && (
+                        <View style={styles.videoSection}>
+                            <View style={styles.sectionHeader}>
+                                <Text style={styles.sectionTitle}>Latest Guidance</Text>
+                                <TouchableOpacity onPress={() => navigation.navigate('Videos')}>
+                                    <Text style={styles.seeAll}>See All</Text>
+                                </TouchableOpacity>
+                            </View>
+                            <ScrollView
+                                horizontal
+                                showsHorizontalScrollIndicator={false}
+                                contentContainerStyle={styles.videoList}
+                            >
+                                {videos.map((video) => (
+                                    <TouchableOpacity
+                                        key={video._id}
+                                        style={styles.videoChip}
+                                        activeOpacity={0.8}
+                                        onPress={() => setSelectedVideo(video)}
+                                    >
+                                        <View style={styles.videoThumbWrapper}>
+                                            <Image source={{ uri: video.thumbnail }} style={styles.videoThumb} />
+                                            <View style={styles.videoPlayOverlay}>
+                                                <PlayCircle size={24} color={Colors.white} />
+                                            </View>
+                                        </View>
+                                        <Text style={styles.videoChipTitle} numberOfLines={2}>{video.title}</Text>
+                                    </TouchableOpacity>
+                                ))}
+                            </ScrollView>
+                        </View>
+                    )}
+
+                    <View style={{ marginTop: 24 }}>
+                        <TestimonialSlider />
+                    </View>
+
+                    <View style={{ marginTop: 8 }}>
+                        <RatingSection />
+                    </View>
+
+                    <View style={{ height: 40 }} />
+                </View>
+            </ScrollView>
+
+            {/* In-App Full Screen Video Player Modal */}
+            <RNModal
+                visible={!!selectedVideo}
+                transparent={true}
+                animationType="fade"
+                statusBarTranslucent
+                onRequestClose={() => setSelectedVideo(null)}
+            >
+                <View style={styles.fullScreenOverlay}>
+                    <TouchableOpacity
+                        style={styles.fullScreenClose}
+                        onPress={() => setSelectedVideo(null)}
+                    >
+                        <X size={28} color={Colors.white} />
+                    </TouchableOpacity>
+
+                    <View style={styles.fullScreenPlayer}>
+                        {selectedVideo && (
+                            Platform.OS === 'web' ? (
+                                <iframe
+                                    width="100%"
+                                    height={SCREEN_WIDTH * (9 / 16)}
+                                    src={`https://www.youtube.com/embed/${selectedVideo.videoId}?autoplay=1`}
+                                    frameBorder="0"
+                                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                                    allowFullScreen
+                                />
+                            ) : (
+                                <YoutubePlayer
+                                    height={SCREEN_WIDTH * (9 / 16)}
+                                    width={SCREEN_WIDTH}
+                                    play={true}
+                                    videoId={selectedVideo.videoId}
+                                />
+                            )
+                        )}
+                    </View>
+                </View>
+            </RNModal>
+
+            {/* Round Selection Modal */}
+            <RNModal
+                visible={roundModalVisible}
+                transparent={true}
+                animationType="fade"
+                onRequestClose={() => setRoundModalVisible(false)}
+            >
+                <View style={styles.modalOverlay}>
+                    <View style={styles.modalContent}>
+                        <Text style={styles.modalTitle}>Select Round</Text>
+                        <Text style={styles.modalSub}>Which round cutoffs do you want to use for this option form?</Text>
+                        
+                        <View style={styles.roundOptions}>
+                            {[1, 2, 3].map(round => {
+                                const isAvailable = selectedGroupedPreset?.availableRounds?.includes(round);
+                                return (
+                                    <TouchableOpacity
+                                        key={round}
+                                        style={[
+                                            styles.roundOptionBtn,
+                                            !isAvailable && styles.roundOptionBtnDisabled
+                                        ]}
+                                        onPress={() => handleRoundSelect(round)}
+                                        disabled={!isAvailable}
+                                    >
+                                        <Layers size={20} color={isAvailable ? Colors.primary : '#94A3B8'} />
+                                        <View style={{ flex: 1 }}>
+                                            <Text style={[styles.roundOptionText, !isAvailable && { color: '#94A3B8' }]}>
+                                                Round {round}
+                                            </Text>
+                                            {!isAvailable && (
+                                                <Text style={styles.roundOptionSubText}>Not available</Text>
+                                            )}
+                                        </View>
+                                        <ChevronRight size={16} color={isAvailable ? Colors.primary : '#94A3B8'} />
+                                    </TouchableOpacity>
+                                );
+                            })}
+                        </View>
+                        
+                        <TouchableOpacity style={styles.closeModalBtn} onPress={() => setRoundModalVisible(false)}>
+                            <Text style={styles.closeModalText}>Cancel</Text>
+                        </TouchableOpacity>
+                    </View>
+                </View>
+            </RNModal>
+
+            <VerificationModal
+                visible={showVerificationModal}
+                user={user}
+                onVerified={refreshUser}
+                onClose={() => setShowVerificationModal(false)}
+            />
+            <SubscriptionPopup
+                visible={showSubscriptionPopup}
+                onClose={() => setShowSubscriptionPopup(false)}
+                onSubscribe={(planId) => {
+                    setShowSubscriptionPopup(false);
+                    navigation.navigate('Pricing', { selectedPlan: planId });
+                }}
+            />
+        </MainLayout>
+    );
+};
+
+const styles = StyleSheet.create({
+    container: { flex: 1, paddingTop: 8 },
+    welcomeSection: { marginBottom: 20, marginTop: 8 },
+    welcomeText: { fontSize: 16, color: Colors.text.tertiary },
+    nameText: { fontSize: 24, fontWeight: 'bold', color: Colors.text.primary, marginTop: 4 },
+
+    pathSelectorContainer: { marginBottom: 24, marginTop: 8 },
+    pathList: { paddingHorizontal: 16, gap: 10 },
+    pathChip: {
+        paddingHorizontal: 16,
+        paddingVertical: 8,
+        borderRadius: 12,
+        backgroundColor: '#F1F5F9',
+        borderWidth: 1.5,
+        borderColor: '#E2E8F0'
+    },
+    activePathChip: {
+        backgroundColor: Colors.primary + '15',
+        borderColor: Colors.primary,
+    },
+    pathText: { fontSize: 13, fontWeight: '600', color: Colors.text.tertiary },
+    activePathText: { color: Colors.primary },
+
+    // Featured Slider
+    featuredSection: { marginBottom: 32 },
+    featuredList: { paddingHorizontal: 16 },
+    featuredCard: {
+        height: 180,
+        borderRadius: 24,
+        marginRight: 16,
+        overflow: 'hidden',
+        backgroundColor: '#eee',
+        ...Shadows.md
+    },
+    featuredImage: { width: '100%', height: '100%' },
+    imageOverlay: {
+        ...StyleSheet.absoluteFillObject,
+        backgroundColor: 'rgba(0,0,0,0.3)'
+    },
+    featuredContent: {
+        ...StyleSheet.absoluteFillObject,
+        padding: 20,
+        justifyContent: 'space-between'
+    },
+    featuredHeader: { alignItems: 'flex-start' },
+    ratingBadge: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 4,
+        backgroundColor: 'rgba(255,255,255,0.25)',
+        paddingHorizontal: 8,
+        paddingVertical: 4,
+        borderRadius: 12,
+    },
+    ratingValue: { color: Colors.white, fontSize: 12, fontWeight: 'bold' },
+    featuredFooter: {},
+    featuredName: { fontSize: 20, fontWeight: 'bold', color: Colors.white },
+    featuredLocRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4 },
+    featuredLocText: { fontSize: 12, color: 'rgba(255,255,255,0.8)' },
+
+    statsRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 12, marginBottom: 32 },
+    statCard: {
+        backgroundColor: Colors.white, padding: 12, borderRadius: 16,
+        flexDirection: 'row', alignItems: 'center', gap: 10, ...Shadows.sm,
+        borderWidth: 1.5, borderColor: Colors.primary
+    },
+    statIcon: { width: 40, height: 40, borderRadius: 12, justifyContent: 'center', alignItems: 'center' },
+    statVal: { fontSize: 18, fontWeight: 'bold', color: Colors.text.primary },
+    statLab: { fontSize: 11, color: Colors.text.tertiary },
+    sectionHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 },
+    sectionTitle: { fontSize: 18, fontWeight: 'bold', color: Colors.text.primary },
+    seeAll: { fontSize: 12, fontWeight: '600', color: Colors.primary },
+    dotContainer: { flexDirection: 'row', gap: 6, alignItems: 'center' },
+    indicatorDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: '#CBD5E1' },
+    activeDot: { width: 14, backgroundColor: Colors.primary, height: 6 },
+    grid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },
+    gridCard: {
+        backgroundColor: Colors.white, padding: 12, borderRadius: 20,
+        borderWidth: 1.5, borderColor: Colors.primary, ...Shadows.xs
+    },
+    gridIconBox: { width: 44, height: 44, borderRadius: 14, backgroundColor: Colors.primary + '10', justifyContent: 'center', alignItems: 'center', marginBottom: 12 },
+    gridLabel: { fontSize: 14, fontWeight: 'bold', color: Colors.text.primary },
+    gridSub: { fontSize: 10, color: Colors.text.tertiary, marginTop: 4 },
+    promoCard: {
+        marginTop: 32, marginHorizontal: 16, backgroundColor: Colors.primary, borderRadius: 24,
+        padding: 24, flexDirection: 'row', overflow: 'hidden'
+    },
+    promoInfo: { flex: 1, zIndex: 1 },
+    promoTitle: { fontSize: 20, fontWeight: 'bold', color: Colors.white },
+    promoSub: { fontSize: 12, color: Colors.white + 'CC', marginTop: 8, lineHeight: 18 },
+    promoBtn: { backgroundColor: Colors.white, alignSelf: 'flex-start', paddingHorizontal: 16, paddingVertical: 8, borderRadius: 30, marginTop: 16 },
+    promoBtnText: { color: Colors.primary, fontSize: 12, fontWeight: 'bold' },
+    promoIcon: { position: 'absolute', right: -10, bottom: -10, opacity: 0.2 },
+
+    // Premium Highlight Styles
+    premiumGridCard: {
+        backgroundColor: Colors.white,
+        shadowColor: Colors.primary,
+        shadowOpacity: 0.15,
+        shadowRadius: 8,
+        elevation: 6,
+    },
+    premiumIconBox: {
+        backgroundColor: Colors.primary + '15',
+    },
+    premiumBadge: {
+        position: 'absolute',
+        top: 10,
+        right: 10,
+        backgroundColor: Colors.primary,
+        paddingHorizontal: 8,
+        paddingVertical: 2,
+        borderRadius: 8,
+    },
+    premiumBadgeText: {
+        color: Colors.white,
+        fontSize: 8,
+        fontWeight: 'bold',
+        letterSpacing: 0.5,
+    },
+    emptyFeatured: {
+        height: 180,
+        backgroundColor: '#F8FAFC',
+        borderRadius: 24,
+        marginHorizontal: 16,
+        marginBottom: 32,
+        justifyContent: 'center',
+        alignItems: 'center',
+        borderWidth: 1,
+        borderColor: '#E2E8F0',
+        borderStyle: 'dashed'
+    },
+    emptyFeaturedText: {
+        marginTop: 10,
+        fontSize: 13,
+        color: Colors.text.tertiary,
+        fontWeight: '500'
+    },
+    statCardEditable: {
+        borderColor: Colors.primary,
+        borderStyle: 'dashed',
+        backgroundColor: Colors.primary + '05'
+    },
+    modalOverlay: {
+        flex: 1,
+        backgroundColor: 'rgba(0,0,0,0.5)',
+        justifyContent: 'center',
+        alignItems: 'center',
+        padding: 20
+    },
+    modalContent: {
+        backgroundColor: Colors.white,
+        borderRadius: 20,
+        padding: 24,
+        width: '100%',
+        maxWidth: 360,
+        ...Shadows.lg
+    },
+    modalTitle: {
+        fontSize: 18,
+        fontWeight: 'bold',
+        color: Colors.text.primary,
+        marginBottom: 8,
+        textAlign: 'center'
+    },
+    modalSub: {
+        fontSize: 13,
+        color: Colors.text.tertiary,
+        textAlign: 'center',
+        marginBottom: 20
+    },
+    roundOptions: {
+        gap: 12
+    },
+    roundOptionBtn: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 12,
+        padding: 16,
+        borderRadius: 12,
+        backgroundColor: '#F8FAFC',
+        borderWidth: 1,
+        borderColor: '#E2E8F0'
+    },
+    roundOptionBtnDisabled: {
+        backgroundColor: '#F1F5F9',
+        opacity: 0.7
+    },
+    roundOptionText: {
+        fontSize: 16,
+        fontWeight: '600',
+        color: Colors.text.primary
+    },
+    roundOptionSubText: {
+        fontSize: 12,
+        color: '#94A3B8',
+        marginTop: 2
+    },
+    closeModalBtn: {
+        marginTop: 20,
+        padding: 12,
+        alignItems: 'center'
+    },
+    closeModalText: {
+        fontSize: 14,
+        fontWeight: '600',
+        color: Colors.text.tertiary
+    },
+    editBadge: {
+        position: 'absolute',
+        top: -4,
+        right: -4,
+        backgroundColor: Colors.primary,
+        width: 14,
+        height: 14,
+        borderRadius: 7,
+        justifyContent: 'center',
+        alignItems: 'center',
+        borderWidth: 1,
+        borderColor: Colors.white
+    },
+    premiumSubCard: {
+        backgroundColor: Colors.white,
+        marginHorizontal: 16,
+        marginBottom: 24,
+        borderRadius: 20,
+        borderWidth: 1.5,
+        borderColor: '#F59E0B',
+        padding: 16,
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        ...Shadows.sm,
+    },
+    premiumSubInfo: {
+        flex: 1,
+    },
+    premiumSubBadge: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        backgroundColor: '#F59E0B10',
+        paddingHorizontal: 8,
+        paddingVertical: 4,
+        borderRadius: 6,
+        alignSelf: 'flex-start',
+        marginBottom: 8,
+        gap: 6
+    },
+    premiumSubBadgeText: {
+        fontSize: 10,
+        fontWeight: '800',
+        color: '#F59E0B',
+        letterSpacing: 0.5
+    },
+    premiumSubTitle: {
+        fontSize: 15,
+        fontWeight: 'bold',
+        color: Colors.text.primary,
+        marginBottom: 2
+    },
+    premiumSubDesc: {
+        fontSize: 12,
+        color: Colors.text.tertiary,
+    },
+    premiumPerkContainer: {
+        flexDirection: 'column',
+        gap: 12,
+        paddingLeft: 16,
+        borderLeftWidth: 1,
+        borderLeftColor: '#F1F5F9',
+    },
+    premiumPerkItem: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 10
+    },
+    premiumPerkIcon: {
+        width: 28,
+        height: 28,
+        borderRadius: 8,
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
+    premiumPerkLabel: {
+        fontSize: 10,
+        color: Colors.text.tertiary,
+        marginBottom: 1
+    },
+    premiumPerkVal: {
+        fontSize: 12,
+        fontWeight: 'bold',
+        color: Colors.text.primary,
+    },
+    videoSection: {
+        marginTop: 32,
+        paddingHorizontal: 0
+    },
+    videoList: {
+        paddingHorizontal: 16,
+        gap: 16,
+        paddingBottom: 8
+    },
+    videoChip: {
+        width: 200,
+    },
+    videoThumbWrapper: {
+        width: 200,
+        height: 112,
+        borderRadius: 16,
+        overflow: 'hidden',
+        backgroundColor: '#F1F5F9',
+        marginBottom: 10,
+        ...Shadows.sm
+    },
+    videoThumb: {
+        width: '100%',
+        height: '100%'
+    },
+    videoPlayOverlay: {
+        ...StyleSheet.absoluteFillObject,
+        backgroundColor: 'rgba(0,0,0,0.2)',
+        justifyContent: 'center',
+        alignItems: 'center'
+    },
+    videoChipTitle: {
+        fontSize: 13,
+        fontWeight: '600',
+        color: Colors.text.primary,
+        lineHeight: 18
+    },
+    fullScreenOverlay: {
+        flex: 1,
+        backgroundColor: '#000',
+        justifyContent: 'center',
+        alignItems: 'center'
+    },
+    fullScreenClose: {
+        position: 'absolute',
+        top: 50,
+        right: 20,
+        zIndex: 100,
+        padding: 10,
+        backgroundColor: 'rgba(0,0,0,0.5)',
+        borderRadius: 25
+    },
+    fullScreenPlayer: {
+        width: '100%',
+        aspectRatio: 16 / 9,
+        justifyContent: 'center'
+    },
+    presetsSection: {
+        marginTop: 24,
+        marginBottom: 16,
+    },
+    presetsScroll: {
+        paddingHorizontal: 16,
+        gap: 16,
+        paddingTop: 10
+    },
+    presetChip: {
+        alignItems: 'center',
+        marginRight: 4
+    },
+    presetCircle: {
+        width: 70,
+        height: 70,
+        borderRadius: 35,
+        borderWidth: 2.5,
+        justifyContent: 'center',
+        alignItems: 'center',
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 3 },
+        shadowOpacity: 0.08,
+        shadowRadius: 4,
+        elevation: 3,
+        backgroundColor: '#ffffff'
+    },
+    presetPercentileText: {
+        fontSize: 14,
+        fontWeight: '800'
+    },
+    presetCirclePercentSign: {
+        fontSize: 8,
+        fontWeight: '600',
+        marginTop: -1
+    },
+    presetCategoryContainer: {
+        marginTop: 6,
+        paddingHorizontal: 8,
+        paddingVertical: 2,
+        borderRadius: 10,
+        backgroundColor: '#f1f5f9'
+    },
+    presetCategoryText: {
+        fontSize: 9,
+        fontWeight: '700',
+        textTransform: 'uppercase'
+    },
+});
+
+export default StudentDashboard;

@@ -1,0 +1,704 @@
+import React, { useState, useEffect } from 'react';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Image, ActivityIndicator, Alert, Platform, TextInput } from 'react-native';
+import MainLayout from '../components/layouts/MainLayout';
+import { Colors, Shadows } from '../constants/theme';
+import { authAPI } from '../services/api';
+import {
+    User as UserIcon, Mail, Phone, Calendar,
+    ShieldCheck, GraduationCap, MapPin, Search,
+    Activity, CheckCircle2, AlertCircle, Star, Trash2, Clock,
+    FileText, ChevronRight, Briefcase, X, ChevronDown, ChevronUp, Compass
+} from 'lucide-react-native';
+import GradientBorder from '../components/ui/GradientBorder';
+
+const AdminUserDetailScreen = ({ route, navigation }) => {
+    const { userId } = route.params;
+    const [user, setUser] = useState(null);
+    const [loading, setLoading] = useState(true);
+    const [updatingRole, setUpdatingRole] = useState(false);
+    const [showCounselorForm, setShowCounselorForm] = useState(false);
+    const [counselorForm, setCounselorForm] = useState({
+        experience: '',
+        field: 'Engineering',
+        cityName: '',
+        contactNumber: '',
+        description: ''
+    });
+
+    useEffect(() => {
+        fetchUser();
+    }, [userId]);
+
+    const fetchUser = async () => {
+        setLoading(true);
+        setUser(null);
+        try {
+            const res = await authAPI.getUserById(userId);
+            if (res.data) {
+                setUser(res.data);
+            }
+        } catch (error) {
+            console.error('Failed to fetch user', error);
+            Alert.alert('Error', 'Failed to load user info');
+            navigation.goBack();
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const handleToggleRole = async () => {
+        const newRole = user.role === 'admin' ? 'student' : 'admin';
+        const title = 'Change Role';
+        const message = `Are you sure you want to change ${user.displayName}'s role from ${user.role} to ${newRole}?`;
+        const action = async () => {
+            setUpdatingRole(true);
+            try {
+                const res = await authAPI.updateUserRole(userId, { role: newRole });
+                setUser({ ...user, role: res.data.role });
+                if (Platform.OS === 'web') alert(`Role updated to ${newRole}`);
+                else Alert.alert('Success', `Role updated to ${newRole}`);
+            } catch (error) {
+                if (Platform.OS === 'web') alert('Failed to update role');
+                else Alert.alert('Error', 'Failed to update role');
+                console.error(error);
+            } finally { setUpdatingRole(false); }
+        };
+        if (Platform.OS === 'web') {
+            if (window.confirm(`${title}\n\n${message}`)) action();
+            return;
+        }
+        Alert.alert(title, message, [{ text: 'Cancel', style: 'cancel' }, { text: 'Confirm', onPress: action }]);
+    };
+
+    const handleMakeCounselor = async () => {
+        setUpdatingRole(true);
+        try {
+            await authAPI.updateUserRole(userId, {
+                role: 'counselor',
+                counselorProfile: {
+                    experience: counselorForm.experience || '1+ Years',
+                    field: counselorForm.field || 'Engineering',
+                    cityName: counselorForm.cityName,
+                    contactNumber: counselorForm.contactNumber || user.phoneNumber || '',
+                    description: counselorForm.description
+                }
+            });
+            setUser({ ...user, role: 'counselor' });
+            setShowCounselorForm(false);
+            if (Platform.OS === 'web') alert('User promoted to Counselor successfully!');
+            else Alert.alert('Success', 'User promoted to Counselor successfully!');
+        } catch (error) {
+            console.error(error);
+            if (Platform.OS === 'web') alert('Failed to promote to Counselor');
+            else Alert.alert('Error', 'Failed to promote to Counselor');
+        } finally { setUpdatingRole(false); }
+    };
+
+    const handleRevokeCounselor = () => {
+        const action = async () => {
+            setUpdatingRole(true);
+            try {
+                await authAPI.updateUserRole(userId, { role: 'student' });
+                setUser({ ...user, role: 'student' });
+                if (Platform.OS === 'web') alert('Counselor role revoked.');
+                else Alert.alert('Done', 'Counselor role revoked. User is now a Student.');
+            } catch (error) {
+                if (Platform.OS === 'web') alert('Failed to revoke role');
+                else Alert.alert('Error', 'Failed to revoke role');
+            } finally { setUpdatingRole(false); }
+        };
+        if (Platform.OS === 'web') {
+            if (window.confirm(`Revoke counselor role from ${user.displayName}?`)) action();
+        } else {
+            Alert.alert('Revoke Counselor', `Remove counselor role from ${user.displayName}?`, [
+                { text: 'Cancel', style: 'cancel' },
+                { text: 'Revoke', style: 'destructive', onPress: action }
+            ]);
+        }
+    };
+
+    const handleDeleteUser = () => {
+        const title = 'Delete User';
+        const message = `Are you sure you want to permanently delete ${user.displayName}? This action cannot be undone.`;
+
+        const action = async () => {
+            try {
+                await authAPI.deleteUser(user._id);
+                if (Platform.OS === 'web') alert('User removed permanently');
+                else Alert.alert('Success', 'User removed permanently');
+                navigation.goBack();
+            } catch (error) {
+                if (Platform.OS === 'web') alert('Failed to delete user');
+                else Alert.alert('Error', 'Failed to delete user');
+            }
+        };
+
+        if (Platform.OS === 'web') {
+            if (window.confirm(`${title}\n\n${message}`)) {
+                action();
+            }
+            return;
+        }
+
+        Alert.alert(
+            title,
+            message,
+            [
+                { text: 'Cancel', style: 'cancel' },
+                {
+                    text: 'Delete Permanently',
+                    style: 'destructive',
+                    onPress: action
+                }
+            ]
+        );
+    };
+
+    const InfoRow = ({ icon: Icon, label, value }) => (
+        <View style={styles.infoRow}>
+            <Icon size={18} color={Colors.text.tertiary} />
+            <View style={styles.infoContent}>
+                <Text style={styles.infoLabel}>{label}</Text>
+                <Text style={styles.infoValue}>{value || 'Not provided'}</Text>
+            </View>
+        </View>
+    );
+
+    const PreferenceBadge = ({ text, color }) => (
+        <View style={[styles.prefBadge, { backgroundColor: color + '12', borderColor: color + '25' }]}>
+            <Text style={[styles.prefBadgeText, { color: color }]}>{text}</Text>
+        </View>
+    );
+
+    if (loading || !user) {
+        return (
+            <MainLayout title="User Loading">
+                <View style={styles.center}>
+                    <ActivityIndicator size="large" color={Colors.primary} />
+                </View>
+            </MainLayout>
+        );
+    }
+
+    return (
+        <MainLayout title="User Details" noPadding>
+            <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
+                <View style={styles.header}>
+                    <View style={styles.avatarRow}>
+                        <GradientBorder size={80} borderWidth={user.isOnline ? 4 : 2} borderColor={user.isOnline ? Colors.success : Colors.divider}>
+                            <Image
+                                source={{ uri: user.preferences?.avatarUrl || `https://ui-avatars.com/api/?name=${user.displayName}&background=4f46e5&color=fff&size=256` }}
+                                style={styles.avatar}
+                            />
+                            <View style={[styles.detailStatusDot, { backgroundColor: user.isOnline ? Colors.success : '#F59E0B' }]} />
+                        </GradientBorder>
+                        <View style={styles.nameHeader}>
+                            <Text style={styles.userName}>{user.displayName}</Text>
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4 }}>
+                                <View style={styles.roleBadgeMajor}>
+                                    <ShieldCheck size={14} color={user.role === 'admin' ? Colors.primary : Colors.text.tertiary} />
+                                    <Text style={[styles.roleTextMajor, user.role === 'admin' && styles.adminRoleTextMajor]}>
+                                        {user.role.toUpperCase()}
+                                    </Text>
+                                </View>
+                                <View style={[styles.statusTag, { backgroundColor: user.isOnline ? Colors.success + '15' : '#F59E0B15' }]}>
+                                    <View style={[styles.tagDot, { backgroundColor: user.isOnline ? Colors.success : '#F59E0B' }]} />
+                                    <Text style={[styles.tagText, { color: user.isOnline ? Colors.success : '#D97706' }]}>
+                                        {user.isOnline ? 'ONLINE' : 'OFFLINE'}
+                                    </Text>
+                                </View>
+                            </View>
+                        </View>
+                    </View>
+
+                    {/* Role Action Buttons */}
+                <View style={styles.actionRow}>
+                    {user.role !== 'counselor' && (
+                        <TouchableOpacity
+                            style={[styles.roleBtn, user.role === 'admin' ? styles.demoteBtn : styles.promoteBtn]}
+                            onPress={handleToggleRole}
+                            disabled={updatingRole}
+                        >
+                            {updatingRole ? (
+                                <ActivityIndicator size="small" color={Colors.white} />
+                            ) : (
+                                <>
+                                    {user.role === 'admin'
+                                        ? <UserIcon size={16} color={Colors.white} />
+                                        : <ShieldCheck size={16} color={Colors.white} />}
+                                    <Text style={styles.btnText}>
+                                        {user.role === 'admin' ? 'Make Student' : 'Make Admin'}
+                                    </Text>
+                                </>
+                            )}
+                        </TouchableOpacity>
+                    )}
+                    <TouchableOpacity style={[styles.roleBtn, styles.deleteBtn]} onPress={handleDeleteUser}>
+                        <Trash2 size={16} color={Colors.white} />
+                        <Text style={styles.btnText}>Delete User</Text>
+                    </TouchableOpacity>
+                </View>
+
+                {/* Counselor Promotion */}
+                <View style={styles.counselorSection}>
+                    {user.role === 'counselor' ? (
+                        <View style={styles.counselorActiveBadge}>
+                            <Briefcase size={16} color='#059669' />
+                            <Text style={styles.counselorActiveText}>Active Counselor</Text>
+                            <TouchableOpacity onPress={handleRevokeCounselor} style={styles.revokeBtn} disabled={updatingRole}>
+                                <X size={14} color='#DC2626' />
+                                <Text style={styles.revokeBtnText}>Revoke</Text>
+                            </TouchableOpacity>
+                        </View>
+                    ) : (
+                        <TouchableOpacity
+                            style={styles.counselorBtn}
+                            onPress={() => setShowCounselorForm(v => !v)}
+                            disabled={updatingRole}
+                        >
+                            <Briefcase size={16} color='#fff' />
+                            <Text style={styles.btnText}>Make Counselor</Text>
+                            {showCounselorForm
+                                ? <ChevronUp size={14} color='#fff' />
+                                : <ChevronDown size={14} color='#fff' />}
+                        </TouchableOpacity>
+                    )}
+
+                    {showCounselorForm && user.role !== 'counselor' && (
+                        <View style={styles.counselorForm}>
+                            <Text style={styles.formLabel}>Experience *</Text>
+                            <TextInput
+                                style={styles.formInput}
+                                placeholder="e.g. 5+ Years"
+                                value={counselorForm.experience}
+                                onChangeText={v => setCounselorForm(f => ({ ...f, experience: v }))}
+                                placeholderTextColor={Colors.text.tertiary}
+                            />
+                            <Text style={styles.formLabel}>Field / Specialization *</Text>
+                            <TextInput
+                                style={styles.formInput}
+                                placeholder="Engineering, Medical, Career..."
+                                value={counselorForm.field}
+                                onChangeText={v => setCounselorForm(f => ({ ...f, field: v }))}
+                                placeholderTextColor={Colors.text.tertiary}
+                            />
+                            <Text style={styles.formLabel}>City *</Text>
+                            <TextInput
+                                style={styles.formInput}
+                                placeholder="Mumbai, Pune, Nagpur..."
+                                value={counselorForm.cityName}
+                                onChangeText={v => setCounselorForm(f => ({ ...f, cityName: v }))}
+                                placeholderTextColor={Colors.text.tertiary}
+                            />
+                            <Text style={styles.formLabel}>Contact Number</Text>
+                            <TextInput
+                                style={styles.formInput}
+                                placeholder={user.phoneNumber || 'Phone number'}
+                                value={counselorForm.contactNumber}
+                                onChangeText={v => setCounselorForm(f => ({ ...f, contactNumber: v }))}
+                                keyboardType='phone-pad'
+                                placeholderTextColor={Colors.text.tertiary}
+                            />
+                            <Text style={styles.formLabel}>Bio / Description</Text>
+                            <TextInput
+                                style={[styles.formInput, { height: 80, textAlignVertical: 'top' }]}
+                                placeholder="Expert educational counselor..."
+                                value={counselorForm.description}
+                                onChangeText={v => setCounselorForm(f => ({ ...f, description: v }))}
+                                multiline
+                                numberOfLines={3}
+                                placeholderTextColor={Colors.text.tertiary}
+                            />
+                            <TouchableOpacity
+                                style={styles.confirmCounselorBtn}
+                                onPress={handleMakeCounselor}
+                                disabled={updatingRole}
+                            >
+                                {updatingRole
+                                    ? <ActivityIndicator size='small' color='#fff' />
+                                    : <Text style={styles.btnText}>{'✓  Confirm — Make Counselor'}</Text>
+                                }
+                            </TouchableOpacity>
+                        </View>
+                    )}
+                </View>
+                </View>
+
+                <View style={styles.section}>
+                    <Text style={styles.sectionTitle}>User Information</Text>
+                    <View style={styles.card}>
+                        <InfoRow icon={Mail} label="Email Address" value={user.email} />
+                        <InfoRow icon={Phone} label="Contact Number" value={user.phoneNumber} />
+                        <InfoRow icon={MapPin} label="Location" value={user.location} />
+                        <InfoRow icon={Compass} label="Expected Region" value={user.expectedRegion} />
+                        <InfoRow icon={GraduationCap} label="Admission Category" value={user.admissionCategory} />
+                        <InfoRow icon={Calendar} label="Member Since" value={user.createdAt ? new Date(user.createdAt).toLocaleDateString() : 'N/A'} />
+                        <InfoRow icon={Clock} label="Last Active" value={user.lastActive ? new Date(user.lastActive).toLocaleString() : 'Never'} />
+                    </View>
+                </View>
+
+                <View style={styles.section}>
+                    <Text style={styles.sectionTitle}>Subscription & Usage</Text>
+                    <View style={styles.card}>
+                        <InfoRow icon={Star} label="Subscription Status" value={user.subscription?.type ? user.subscription.type.toUpperCase() : 'FREE'} />
+                        <View style={[styles.academicGrid, { marginTop: 16, marginBottom: 0 }]}>
+                            <View style={styles.academicBox}>
+                                <Text style={styles.academicLabel}>Predictions Used</Text>
+                                <Text style={styles.academicVal}>{user.subscription?.usage?.predictions || 0}</Text>
+                            </View>
+                            <View style={styles.academicBox}>
+                                <Text style={styles.academicLabel}>AI Prompts Used</Text>
+                                <Text style={styles.academicVal}>{user.subscription?.usage?.aiPrompts || 0}</Text>
+                            </View>
+                            <View style={styles.academicBox}>
+                                <Text style={styles.academicLabel}>Exports Used</Text>
+                                <Text style={styles.academicVal}>{user.subscription?.usage?.exports || 0}</Text>
+                            </View>
+                        </View>
+                    </View>
+                </View>
+
+                <View style={styles.section}>
+                    <Text style={styles.sectionTitle}>Document Verification</Text>
+                    <View style={styles.card}>
+                        {user.documents && Object.keys(user.documents).length > 0 ? (
+                            <View>
+                                <View style={styles.docStats}>
+                                    <FileText size={20} color={Colors.primary} />
+                                    <Text style={styles.docStatsText}>
+                                        {Object.keys(user.documents).length} Documents Submitted
+                                    </Text>
+                                </View>
+                                <TouchableOpacity 
+                                    style={styles.manageDocsBtn}
+                                    onPress={() => navigation.navigate('AdminStudentDocuments', { search: user.email })}
+                                >
+                                    <Text style={styles.manageDocsText}>Manage Documents</Text>
+                                    <ChevronRight size={16} color="#fff" />
+                                </TouchableOpacity>
+                            </View>
+                        ) : (
+                            <View style={styles.emptyDocsBox}>
+                                <AlertCircle size={20} color={Colors.text.tertiary} />
+                                <Text style={styles.emptyDocsText}>No documents uploaded yet.</Text>
+                            </View>
+                        )}
+                    </View>
+                </View>
+
+                <View style={styles.section}>
+                    <Text style={styles.sectionTitle}>Prediction Preferences</Text>
+                    <View style={styles.card}>
+                        <View style={styles.academicGrid}>
+                            <View style={styles.academicBox}>
+                                <Text style={styles.academicLabel}>Exam</Text>
+                                <Text style={styles.academicVal}>{user.examType || '?'}</Text>
+                            </View>
+                            <View style={styles.academicBox}>
+                                <Text style={styles.academicLabel}>Percentile</Text>
+                                <Text style={styles.academicVal}>{user.percentile || '0'}</Text>
+                            </View>
+                            <View style={styles.academicBox}>
+                                <Text style={styles.academicLabel}>Rank</Text>
+                                <Text style={styles.academicVal}>{user.rank || '-'}</Text>
+                            </View>
+                        </View>
+
+                        <Text style={styles.innerLabel}>Target Branches</Text>
+                        <View style={styles.prefGrid}>
+                            {user.preferences?.preferredBranches?.length > 0 ? (
+                                user.preferences.preferredBranches.map((b, i) => <PreferenceBadge key={i} text={b} color={Colors.primary} />)
+                            ) : (
+                                <Text style={styles.emptySmall}>No branches selected</Text>
+                            )}
+                        </View>
+
+                        <Text style={[styles.innerLabel, { marginTop: 12 }]}>Preferred Regions</Text>
+                        <View style={styles.prefGrid}>
+                            {user.preferences?.preferredRegions?.length > 0 ? (
+                                user.preferences.preferredRegions.map((r, i) => <PreferenceBadge key={i} text={r} color={Colors.success} />)
+                            ) : (
+                                <Text style={styles.emptySmall}>No regions selected</Text>
+                            )}
+                        </View>
+
+                        <Text style={[styles.innerLabel, { marginTop: 12 }]}>College Type Preferences</Text>
+                        <View style={styles.prefGrid}>
+                            {user.preferences?.collegeStatusPreference?.length > 0 ? (
+                                user.preferences.collegeStatusPreference.map((s, i) => <PreferenceBadge key={i} text={s} color={Colors.accent} />)
+                            ) : (
+                                <Text style={styles.emptySmall}>No status preferences</Text>
+                            )}
+                        </View>
+                    </View>
+                </View>
+
+                <View style={styles.section}>
+                    <Text style={styles.sectionTitle}>Interactions</Text>
+                    <View style={styles.card}>
+                        <View style={styles.statLine}>
+                            <View style={styles.statItem}>
+                                <Star size={16} color="#F59E0B" fill="#F59E0B" />
+                                <Text style={styles.statText}>{user.savedColleges?.length || 0} Saved</Text>
+                            </View>
+                            <View style={styles.statItem}>
+                                <Activity size={16} color={Colors.success} />
+                                <Text style={styles.statText}>Active Account</Text>
+                            </View>
+                        </View>
+                    </View>
+                </View>
+
+                {user.lastPredictorPreferences && Object.keys(user.lastPredictorPreferences).length > 0 && (
+                    <View style={styles.section}>
+                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                                <Search size={14} color={Colors.text.tertiary} />
+                                <Text style={[styles.sectionTitle, { marginBottom: 0 }]}>Latest Predictor Search</Text>
+                            </View>
+                            <TouchableOpacity onPress={fetchUser} style={styles.miniRefreshBtn}>
+                                <Activity size={14} color={Colors.primary} />
+                                <Text style={styles.miniRefreshText}>Refresh</Text>
+                            </TouchableOpacity>
+                        </View>
+                        <View style={[styles.card, { borderLeftWidth: 4, borderLeftColor: Colors.primary }]}>
+                            <View style={styles.academicGrid}>
+                                <View style={styles.academicBox}>
+                                    <Text style={styles.academicLabel}>Search %ile</Text>
+                                    <Text style={styles.academicVal}>{user.lastPredictorPreferences.percentile || '-'}</Text>
+                                </View>
+                                <View style={styles.academicBox}>
+                                    <Text style={styles.academicLabel}>Search Rank</Text>
+                                    <Text style={styles.academicVal}>{user.lastPredictorPreferences.rank || '-'}</Text>
+                                </View>
+                                <View style={styles.academicBox}>
+                                    <Text style={styles.academicLabel}>Category</Text>
+                                    <Text style={styles.academicVal}>{user.lastPredictorPreferences.category || '-'}</Text>
+                                </View>
+                            </View>
+
+                            <View style={[styles.academicGrid, { marginBottom: 12 }]}>
+                                <View style={styles.academicBox}>
+                                    <Text style={styles.academicLabel}>Year</Text>
+                                    <Text style={styles.academicVal}>{user.lastPredictorPreferences.year || '-'}</Text>
+                                </View>
+                                <View style={styles.academicBox}>
+                                    <Text style={styles.academicLabel}>Round</Text>
+                                    <Text style={styles.academicVal}>{user.lastPredictorPreferences.round || '-'}</Text>
+                                </View>
+                                <View style={styles.academicBox}>
+                                    <Text style={styles.academicLabel}>Exam Type</Text>
+                                    <Text style={styles.academicVal}>{user.lastPredictorPreferences.examType || '-'}</Text>
+                                </View>
+                            </View>
+
+                            <View style={[styles.academicGrid, { marginBottom: 12 }]}>
+                                <View style={styles.academicBox}>
+                                    <Text style={styles.academicLabel}>pTolerance</Text>
+                                    <Text style={styles.academicVal}>{user.lastPredictorPreferences.pTolerance || '5'}</Text>
+                                </View>
+                                <View style={styles.academicBox}>
+                                    <Text style={styles.academicLabel}>rTolerance</Text>
+                                    <Text style={styles.academicVal}>{user.lastPredictorPreferences.rTolerance || '500'}</Text>
+                                </View>
+                                <View style={styles.academicBox}>
+                                    <Text style={styles.academicLabel}>Female Seat</Text>
+                                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                                        <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: user.lastPredictorPreferences.isFemale ? Colors.error : Colors.divider }} />
+                                        <Text style={styles.academicVal}>{user.lastPredictorPreferences.isFemale ? 'YES' : 'NO'}</Text>
+                                    </View>
+                                </View>
+                            </View>
+
+                            {user.lastPredictorPreferences.institutionTypes && (
+                                <>
+                                    <Text style={styles.innerLabel}>Institution Filter</Text>
+                                    <View style={styles.prefGrid}>
+                                        {(Array.isArray(user.lastPredictorPreferences.institutionTypes)
+                                            ? user.lastPredictorPreferences.institutionTypes
+                                            : user.lastPredictorPreferences.institutionTypes.split(',')).map((t, i) => (
+                                                <PreferenceBadge key={i} text={t} color={Colors.text.primary} />
+                                            ))}
+                                    </View>
+                                </>
+                            )}
+
+                            {user.lastPredictorPreferences.seatTypes && (
+                                <>
+                                    <Text style={styles.innerLabel}>Seat Types Context</Text>
+                                    <View style={styles.prefGrid}>
+                                        {(Array.isArray(user.lastPredictorPreferences.seatTypes)
+                                            ? user.lastPredictorPreferences.seatTypes
+                                            : user.lastPredictorPreferences.seatTypes.split(',')).map((s, i) => (
+                                                <PreferenceBadge key={i} text={s} color={Colors.error} />
+                                            ))}
+                                    </View>
+                                </>
+                            )}
+
+                            {user.lastPredictorPreferences.branches && (
+                                <>
+                                    <Text style={styles.innerLabel}>Queried Branches</Text>
+                                    <View style={styles.prefGrid}>
+                                        {(Array.isArray(user.lastPredictorPreferences.branches)
+                                            ? user.lastPredictorPreferences.branches
+                                            : user.lastPredictorPreferences.branches.split(',')).map((b, i) => (
+                                                <PreferenceBadge key={i} text={b} color={Colors.primary} />
+                                            ))}
+                                    </View>
+                                </>
+                            )}
+
+                            {user.lastPredictorPreferences.regions && (
+                                <>
+                                    <Text style={styles.innerLabel}>Target Regions</Text>
+                                    <View style={styles.prefGrid}>
+                                        {(Array.isArray(user.lastPredictorPreferences.regions)
+                                            ? user.lastPredictorPreferences.regions
+                                            : user.lastPredictorPreferences.regions.split(',')).map((r, i) => (
+                                                <PreferenceBadge key={i} text={r} color={Colors.success} />
+                                            ))}
+                                    </View>
+                                </>
+                            )}
+
+
+
+                            <Text style={[styles.timeText, { marginTop: 16, textAlign: 'right', fontSize: 10 }]}>
+                                Predicted on: {user.lastPredictorPreferences.timestamp ? new Date(user.lastPredictorPreferences.timestamp).toLocaleString() : 'N/A'}
+                            </Text>
+                        </View>
+                    </View>
+                )}
+
+                <View style={{ height: 100 }} />
+            </ScrollView>
+        </MainLayout>
+    );
+};
+
+const styles = StyleSheet.create({
+    container: { flex: 1, backgroundColor: '#F8FAFC' },
+    center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
+    header: { padding: 24, backgroundColor: Colors.white, borderBottomWidth: 1, borderBottomColor: Colors.divider },
+    avatarRow: { alignItems: 'center', marginBottom: 20 },
+    avatar: { width: '100%', height: '100%' },
+    nameHeader: { alignItems: 'center', marginTop: 12 },
+    userName: { fontSize: 24, fontWeight: 'bold', color: Colors.text.primary },
+    roleBadgeMajor: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4, backgroundColor: '#F1F5F9', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 20 },
+    roleTextMajor: { fontSize: 12, fontWeight: 'bold', color: Colors.text.tertiary, letterSpacing: 0.5 },
+    adminRoleTextMajor: { color: Colors.primary },
+
+    actionRow: { flexDirection: 'row', gap: 12, marginTop: 10, justifyContent: 'center' },
+    roleBtn: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 16, paddingVertical: 10, borderRadius: 12, ...Shadows.sm, minWidth: 140, justifyContent: 'center' },
+    promoteBtn: { backgroundColor: Colors.primary },
+    demoteBtn: { backgroundColor: Colors.text.secondary },
+    deleteBtn: { backgroundColor: Colors.error },
+    btnText: { color: Colors.white, fontWeight: 'bold', fontSize: 13 },
+
+    section: { paddingHorizontal: 16, paddingTop: 24 },
+    sectionTitle: { fontSize: 13, fontWeight: '800', color: Colors.text.tertiary, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 12 },
+    card: { backgroundColor: Colors.white, borderRadius: 20, padding: 16, ...Shadows.xs, borderWidth: 1, borderColor: '#EFF6FF' },
+
+    infoRow: { flexDirection: 'row', alignItems: 'center', gap: 16, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: '#F8FAFC' },
+    infoContent: { flex: 1 },
+    infoLabel: { fontSize: 11, color: Colors.text.tertiary, marginBottom: 2 },
+    infoValue: { fontSize: 14, fontWeight: '600', color: Colors.text.primary },
+
+    statusRow: { marginTop: 12 },
+    statusBadge: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 10, paddingVertical: 4, borderRadius: 20, alignSelf: 'flex-start' },
+    verifiedBadge: { backgroundColor: Colors.success + '15' },
+    unverifiedBadge: { backgroundColor: Colors.error + '15' },
+    statusText: { fontSize: 10, fontWeight: 'bold' },
+    verifiedText: { color: Colors.success },
+    unverifiedText: { color: Colors.error },
+
+    academicGrid: { flexDirection: 'row', gap: 12, marginBottom: 20 },
+    academicBox: { flex: 1, backgroundColor: '#F8FAFC', padding: 12, borderRadius: 14, alignItems: 'center', borderWidth: 1, borderColor: '#E2E8F0' },
+    academicLabel: { fontSize: 10, color: Colors.text.tertiary, marginBottom: 4 },
+    academicVal: { fontSize: 15, fontWeight: 'bold', color: Colors.text.primary },
+
+    innerLabel: { fontSize: 12, fontWeight: 'bold', color: Colors.text.secondary, marginBottom: 8, marginTop: 12 },
+    prefGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
+    prefBadge: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8, borderWidth: 1 },
+    prefBadgeText: { fontSize: 10, fontWeight: '700' },
+    emptySmall: { fontSize: 12, color: Colors.text.tertiary, fontStyle: 'italic' },
+
+    statLine: { flexDirection: 'row', gap: 24 },
+    statItem: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+    statText: { fontSize: 13, fontWeight: '600', color: Colors.text.secondary },
+    timeText: { fontSize: 11, color: Colors.text.tertiary },
+    miniRefreshBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8, backgroundColor: Colors.primary + '10' },
+    miniRefreshText: { fontSize: 11, fontWeight: '700', color: Colors.primary },
+
+    resultsBox: { backgroundColor: '#F1F5F9', borderRadius: 12, overflow: 'hidden' },
+    resultRow: { borderBottomWidth: 1, borderBottomColor: Colors.white, padding: 10 },
+    resultColl: { fontSize: 13, fontWeight: 'bold', color: Colors.text.primary, marginBottom: 2 },
+    resultSub: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+    resultBranch: { fontSize: 11, color: Colors.text.secondary, fontWeight: '600' },
+    resultDets: { fontSize: 10, color: Colors.text.tertiary },
+    detailStatusDot: {
+        position: 'absolute',
+        bottom: 2,
+        right: 2,
+        width: 18,
+        height: 18,
+        borderRadius: 9,
+        borderWidth: 3,
+        borderColor: Colors.white,
+        backgroundColor: Colors.success,
+        ...Shadows.sm
+    },
+    statusTag: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 5,
+        paddingHorizontal: 10,
+        paddingVertical: 4,
+        borderRadius: 20
+    },
+    tagDot: { width: 6, height: 6, borderRadius: 3 },
+    tagText: { fontSize: 10, fontWeight: '900', letterSpacing: 0.5 },
+    docStats: { flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 16 },
+    docStatsText: { fontSize: 15, fontWeight: 'bold', color: Colors.text.primary },
+    manageDocsBtn: { 
+        backgroundColor: Colors.primary, flexDirection: 'row', 
+        alignItems: 'center', justifyContent: 'center', gap: 8, 
+        paddingVertical: 12, borderRadius: 12, ...Shadows.sm 
+    },
+    manageDocsText: { color: '#fff', fontWeight: 'bold', fontSize: 14 },
+    emptyDocsBox: { paddingVertical: 12, alignItems: 'center', gap: 8 },
+    emptyDocsText: { fontSize: 13, color: Colors.text.tertiary, fontStyle: 'italic' },
+
+    counselorSection: { paddingHorizontal: 16, paddingTop: 12, paddingBottom: 8 },
+    counselorBtn: {
+        flexDirection: 'row', alignItems: 'center', gap: 8, justifyContent: 'center',
+        backgroundColor: '#0891B2', paddingVertical: 12, paddingHorizontal: 20,
+        borderRadius: 14, ...Shadows.sm
+    },
+    counselorActiveBadge: {
+        flexDirection: 'row', alignItems: 'center', gap: 10,
+        backgroundColor: '#ECFDF5', borderWidth: 1, borderColor: '#6EE7B7',
+        borderRadius: 14, paddingHorizontal: 16, paddingVertical: 12
+    },
+    counselorActiveText: { flex: 1, fontSize: 14, fontWeight: '700', color: '#059669' },
+    revokeBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: '#FEE2E2', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8 },
+    revokeBtnText: { fontSize: 12, fontWeight: '700', color: '#DC2626' },
+    counselorForm: {
+        marginTop: 12, backgroundColor: Colors.white, borderRadius: 16,
+        padding: 16, borderWidth: 1, borderColor: '#E0F2FE', ...Shadows.xs
+    },
+    formLabel: { fontSize: 11, fontWeight: '700', color: Colors.text.secondary, marginBottom: 4, marginTop: 10 },
+    formInput: {
+        backgroundColor: '#F8FAFC', borderWidth: 1, borderColor: '#E2E8F0',
+        borderRadius: 10, paddingHorizontal: 12, paddingVertical: 10,
+        fontSize: 14, color: Colors.text.primary
+    },
+    confirmCounselorBtn: {
+        marginTop: 16, backgroundColor: '#059669', flexDirection: 'row',
+        alignItems: 'center', justifyContent: 'center', paddingVertical: 13,
+        borderRadius: 12, ...Shadows.sm
+    },
+});
+
+export default AdminUserDetailScreen;

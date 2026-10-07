@@ -1,0 +1,1109 @@
+const User = require('../models/User');
+const Institution = require('../models/Institution');
+const Counselor = require('../models/Counselor');
+const OTP = require('../models/OTP');
+const jwt = require('jsonwebtoken');
+const generateToken = require('../utils/generateToken');
+const { client: redis } = require('../config/redis');
+const { triggerDailyNotifications } = require('../services/notificationService');
+const sendEmail = require('../utils/mailer');
+const { OAuth2Client } = require('google-auth-library');
+const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+
+const getRandomAvatar = (name) => {
+    const categories = ['bottts', 'avataaars', 'micah', 'pixel-art', 'adventurer', 'open-peeps', 'lorelei', 'fun-emoji', 'notionists'];
+    const category = categories[Math.floor(Math.random() * categories.length)];
+    const seeds = ['Felix', 'Max', 'Luna', 'Jack', 'Daisy', 'Zoe', 'Milo', 'Coco', 'Oliver', 'Toby'];
+    const randomSeed = seeds[Math.floor(Math.random() * seeds.length)] + Math.floor(Math.random() * 1000);
+    return {
+        url: `https://api.dicebear.com/9.x/${category}/png?seed=${randomSeed}&backgroundColor=c7ecee&radius=50`,
+        seed: randomSeed
+    };
+};
+
+// @desc    Register a new user
+// @route   POST /api/auth/register
+// @access  Public
+const registerUser = async (req, res) => {
+    const { displayName, email, password, role, examType, percentile, rank, location, expectedRegion } = req.body;
+    let { preferences } = req.body;
+
+    const userExists = await User.findOne({ email });
+
+    if (userExists) {
+        return res.status(400).json({ message: 'User already exists' });
+    }
+
+    // Auto-assign random avatar
+    const avatar = getRandomAvatar(displayName);
+    if (!preferences) preferences = {};
+    preferences.avatarUrl = avatar.url;
+    preferences.avatarSeed = avatar.seed;
+    preferences.hasConfirmedAvatar = false;
+
+    const user = await User.create({
+        displayName,
+        email,
+        password,
+        role: role || 'student',
+        examType,
+        percentile,
+        rank,
+        location,
+        expectedRegion,
+        preferences
+    });
+
+    if (user) {
+        // Send welcome notification (with slight delay so user joins room on frontend)
+        setTimeout(() => {
+            const { sendNotification } = require('../services/notificationService');
+            sendNotification(
+                user._id,
+                `Welcome to CollegeAdvisor, ${user.displayName}! 🎉`,
+                "We're excited to have you here! Start exploring colleges and predicting your dream branches. 🚀",
+                "success"
+            );
+        }, 2000);
+
+        res.status(201).json({
+            token: generateToken(user._id),
+            _id: user._id,
+            displayName: user.displayName,
+            email: user.email,
+            role: user.role,
+            showAvatarPopup: true
+        });
+    } else {
+        res.status(400).json({ message: 'Invalid user data' });
+    }
+};
+
+// @desc    Auth user & get token
+// @route   POST /api/auth/login
+// @access  Public
+const loginUser = async (req, res) => {
+    const { email, password } = req.body;
+
+    const user = await User.findOne({ email });
+
+    if (user && (await user.matchPassword(password))) {
+        // If no avatar set, assign one now
+        if (!user.preferences?.avatarUrl) {
+            const avatar = getRandomAvatar(user.displayName);
+            if (!user.preferences) user.preferences = {};
+            user.preferences.avatarUrl = avatar.url;
+            user.preferences.avatarSeed = avatar.seed;
+            user.preferences.hasConfirmedAvatar = false;
+            await user.save();
+        }
+
+        res.json({
+            _id: user._id,
+            displayName: user.displayName,
+            email: user.email,
+            role: user.role,
+            examType: user.examType,
+            percentile: user.percentile,
+            rank: user.rank,
+            location: user.location,
+            expectedRegion: user.expectedRegion,
+            bannerUrl: user.bannerUrl,
+            preferences: user.preferences,
+            savedColleges: (await user.populate('savedColleges', 'name location type feesPerYear rating dteCode galleryImages university category')).savedColleges || [],
+            savedPredictions: (await user.populate('savedPredictions.collegeId', 'name location dteCode category')).savedPredictions || [],
+            subscription: user.subscription,
+            phoneNumber: user.phoneNumber,
+            token: generateToken(user._id),
+            groqApiKey: user.groqApiKey,
+            admissionCategory: user.admissionCategory || 'OPEN',
+            documentChecklist: user.documentChecklist || {},
+            documents: user.documents || {},
+            showAvatarPopup: !user.preferences?.hasConfirmedAvatar
+        });
+    } else {
+        res.status(401).json({ message: 'Invalid email or password' });
+    }
+};
+
+// @desc    Get user profile
+// @route   GET /api/auth/profile
+// @access  Private
+const updateAvatarPreference = async (req, res) => {
+    try {
+        const { action, customUrl } = req.body;
+        const user = await User.findById(req.user._id);
+
+        if (!user) return res.status(404).json({ message: 'User not found' });
+
+        if (!user.preferences) user.preferences = {};
+
+        if (action === 'confirm') {
+            user.preferences.hasConfirmedAvatar = true;
+        } else if (action === 'shuffle') {
+            const avatar = getRandomAvatar(user.displayName);
+            user.preferences.avatarUrl = avatar.url;
+            user.preferences.avatarSeed = avatar.seed;
+            user.preferences.hasConfirmedAvatar = false;
+        } else if (action === 'set' && customUrl) {
+            user.preferences.avatarUrl = customUrl;
+            user.preferences.hasConfirmedAvatar = true;
+        }
+
+        await user.save();
+        await redis.del(`user_profile_${req.user._id}`);
+
+        res.json({ success: true, preferences: user.preferences });
+    } catch (error) {
+        res.status(500).json({ message: 'Server Error' });
+    }
+};
+
+const getUserProfile = async (req, res) => {
+    try {
+        const cacheKey = `user_profile_${req.user._id}`;
+        const cachedData = await redis.get(cacheKey);
+
+        if (cachedData) {
+            console.log(`[Redis] Hit: ${cacheKey}`);
+            return res.json(JSON.parse(cachedData));
+        }
+
+        const user = await User.findById(req.user._id);
+
+        if (user) {
+            // Trigger Daily Notifications check (Max 2, 6h cooldown, only when online)
+            if (user.role === 'student' && !cachedData) {
+                triggerDailyNotifications(user).catch(e => console.error(e));
+            }
+
+            const profileData = {
+                _id: user._id,
+                displayName: user.displayName,
+                email: user.email,
+                role: user.role,
+                examType: user.examType,
+                percentile: user.percentile,
+                rank: user.rank,
+                location: user.location,
+                expectedRegion: user.expectedRegion,
+                bannerUrl: user.bannerUrl,
+                preferences: user.preferences,
+                savedColleges: (await user.populate('savedColleges', 'name location type feesPerYear rating dteCode galleryImages university category')).savedColleges || [],
+                savedPredictions: (await user.populate('savedPredictions.collegeId', 'name location dteCode category')).savedPredictions || [],
+                subscription: user.subscription,
+                groqApiKey: user.groqApiKey,
+                isVerified: user.isVerified,
+                phoneNumber: user.phoneNumber,
+                admissionCategory: user.admissionCategory || 'OPEN',
+                documentChecklist: user.documentChecklist || {},
+                documents: user.documents || {}
+            };
+
+            await redis.set(cacheKey, JSON.stringify(profileData), { EX: 3600 }); // Cache for 1 hour
+            res.json(profileData);
+        } else {
+            res.status(404).json({ message: 'User not found' });
+        }
+    } catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+};
+
+// @desc    Update user profile
+// @route   PUT /api/auth/profile
+// @access  Private
+const updateUserProfile = async (req, res) => {
+    const user = await User.findById(req.user._id);
+
+    if (user) {
+        if (req.body.displayName) user.displayName = req.body.displayName;
+        if (req.body.email) user.email = req.body.email;
+        if (req.body.password) {
+            user.password = req.body.password;
+        }
+
+        // Handle multiple scores
+        if (req.body.scores) {
+            if (!user.scores) user.scores = new Map();
+            Object.keys(req.body.scores).forEach(key => {
+                const scoreData = req.body.scores[key];
+                // Handle deletion if scoreData is null
+                if (scoreData === null) {
+                    user.scores.delete(key);
+                } else {
+                    user.scores.set(key, scoreData);
+
+                    // Synchronize primary fields if updating the currently selected examType
+                    if (key === (req.body.examType || user.examType)) {
+                        if (scoreData.percentile !== undefined) user.percentile = scoreData.percentile;
+                        if (scoreData.rank !== undefined) user.rank = scoreData.rank;
+                    }
+                }
+            });
+        }
+
+        // Update new academic & key fields
+        if (req.body.examType) {
+            user.examType = req.body.examType;
+            // Sync primary fields from scores map if they exist for this new type
+            if (user.scores && user.scores.has(user.examType)) {
+                const s = user.scores.get(user.examType);
+                user.percentile = s.percentile;
+                user.rank = s.rank;
+            }
+        }
+        if (req.body.percentile !== undefined) user.percentile = req.body.percentile;
+        if (req.body.rank !== undefined) user.rank = req.body.rank;
+        if (req.body.location !== undefined) user.location = req.body.location;
+        if (req.body.expectedRegion !== undefined) user.expectedRegion = req.body.expectedRegion;
+        if (req.body.bannerUrl !== undefined) user.bannerUrl = req.body.bannerUrl;
+        if (req.body.preferences) user.preferences = req.body.preferences;
+        if (req.body.savedPredictions) user.savedPredictions = req.body.savedPredictions;
+        if (req.body.subscription) user.subscription = req.body.subscription;
+        if (req.body.admissionCategory !== undefined) user.admissionCategory = req.body.admissionCategory;
+        if (req.body.documentChecklist !== undefined) user.documentChecklist = req.body.documentChecklist;
+        if (req.body.documents !== undefined) user.documents = req.body.documents;
+
+        // Handle Groq API Key (can be null if removed)
+        if (req.body.groqApiKey !== undefined) {
+            user.groqApiKey = req.body.groqApiKey;
+        }
+
+        if (req.body.phoneNumber !== undefined) {
+            user.phoneNumber = req.body.phoneNumber;
+        }
+
+        const updatedUser = await user.save();
+
+        // Invalidate cache
+        await redis.del(`user_profile_${req.user._id}`);
+
+        // Return populated user including saved entities
+        const finalUser = await User.findById(updatedUser._id)
+            .populate('savedColleges', 'name location type feesPerYear rating dteCode galleryImages university category')
+            .populate('savedPredictions.collegeId', 'name location dteCode category');
+
+        // Push update via Socket for real-time smoothness
+        const profileResponse = {
+            _id: finalUser._id,
+            displayName: finalUser.displayName,
+            email: finalUser.email,
+            role: finalUser.role,
+            examType: finalUser.examType,
+            scores: finalUser.scores,
+            percentile: finalUser.percentile,
+            rank: finalUser.rank,
+            location: finalUser.location,
+            expectedRegion: finalUser.expectedRegion,
+            bannerUrl: finalUser.bannerUrl,
+            preferences: finalUser.preferences,
+            savedColleges: finalUser.savedColleges,
+            savedPredictions: finalUser.savedPredictions,
+            subscription: finalUser.subscription,
+            groqApiKey: finalUser.groqApiKey,
+            isVerified: finalUser.isVerified,
+            phoneNumber: finalUser.phoneNumber,
+            admissionCategory: finalUser.admissionCategory || 'OPEN',
+            documentChecklist: finalUser.documentChecklist || {},
+            documents: finalUser.documents || {},
+            token: generateToken(finalUser._id)
+        };
+
+        if (req.io) {
+            console.log(`[Socket] Emitting user:updated to room: ${finalUser._id}`);
+            req.io.to(finalUser._id.toString()).emit('user:updated', profileResponse);
+            req.io.emit('student:document_updated', profileResponse);
+        }
+
+        res.json(profileResponse);
+    } else {
+        res.status(404).json({ message: 'User not found' });
+    }
+};
+
+const changePassword = async (req, res) => {
+    const { currentPassword, newPassword } = req.body;
+    const user = await User.findById(req.user._id);
+
+    if (user && (await user.matchPassword(currentPassword))) {
+        user.password = newPassword;
+        await user.save();
+        res.json({ success: true, message: 'Password updated' });
+    } else {
+        res.status(400).json({ message: 'Invalid current password' });
+    }
+};
+
+const toggleSaveCollege = async (req, res) => {
+    const { collegeId } = req.body;
+    const user = await User.findById(req.user._id);
+
+    if (user) {
+        if (!user.savedColleges) user.savedColleges = [];
+
+        const isSaved = user.savedColleges.some(id => id.toString() === collegeId);
+        if (isSaved) {
+            user.savedColleges = user.savedColleges.filter(id => id.toString() !== collegeId);
+        } else {
+            user.savedColleges.push(collegeId);
+        }
+        await user.save();
+
+        // Invalidate cache
+        await redis.del(`user_profile_${req.user._id}`);
+
+        // Return populated saved colleges to sync frontend state
+        const updatedUser = await User.findById(req.user._id).populate('savedColleges', 'name location type feesPerYear rating dteCode galleryImages university category');
+        
+        // Push update via Socket for real-time smoothness
+        if (req.io) {
+            req.io.to(req.user._id.toString()).emit('user:updated', updatedUser);
+        }
+
+        res.json({ success: true, savedColleges: updatedUser.savedColleges });
+    } else {
+        res.status(404).json({ message: 'User not found' });
+    }
+};
+
+const toggleSavePrediction = async (req, res) => {
+    const { prediction } = req.body; // { collegeId, branch, year, round, percentile, category, seatType, chanceLabel, chanceColor }
+    const user = await User.findById(req.user._id);
+
+    if (user) {
+        if (!user.savedPredictions) user.savedPredictions = [];
+
+        // Check if already saved (match by collegeId, branch, year, round)
+        const existingIndex = user.savedPredictions.findIndex(p =>
+            p.collegeId && prediction.collegeId &&
+            p.collegeId.toString() === prediction.collegeId &&
+            p.branch === prediction.branch &&
+            p.year === prediction.year &&
+            p.round === prediction.round &&
+            (p.category || '') === (prediction.category || '') &&
+            (p.seatType || '') === (prediction.seatType || '')
+        );
+
+        if (existingIndex > -1) {
+            user.savedPredictions.splice(existingIndex, 1);
+        } else {
+            user.savedPredictions.push(prediction);
+        }
+        await user.save();
+
+        // Invalidate cache
+        await redis.del(`user_profile_${req.user._id}`);
+
+        // Return populated saved predictions to sync frontend state
+        const updatedUser = await User.findById(req.user._id).populate('savedPredictions.collegeId', 'name location dteCode category');
+        
+        // Push update via Socket for real-time smoothness
+        if (req.io) {
+            req.io.to(req.user._id.toString()).emit('user:updated', updatedUser);
+        }
+
+        res.json({ success: true, savedPredictions: updatedUser.savedPredictions });
+    } else {
+        res.status(404).json({ message: 'User not found' });
+    }
+};
+
+// @desc    Get all users (Admin only)
+// @route   GET /api/auth/users
+// @access  Private/Admin
+const getAllUsers = async (req, res) => {
+    const users = await User.find({}).select('-password').sort({ isOnline: -1, lastActive: -1 });
+    res.json(users);
+};
+
+// @desc    Get user by ID (Admin only)
+// @route   GET /api/auth/users/:id
+// @access  Private/Admin
+const getUserById = async (req, res) => {
+    try {
+        const user = await User.findById(req.params.id).select('-password');
+        if (user) {
+            res.json(user);
+        } else {
+            res.status(404).json({ message: 'User not found' });
+        }
+    } catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+};
+
+// @desc    Register a college admin (Admin only)
+// @route   POST /api/auth/register-college-admin
+// @access  Private/Admin
+const registerCollegeAdmin = async (req, res) => {
+    const { displayName, email, password, managedInstitution } = req.body;
+
+    if (!managedInstitution) {
+        return res.status(400).json({ message: 'managedInstitution ID is required' });
+    }
+
+    const userExists = await User.findOne({ email });
+    if (userExists) {
+        return res.status(400).json({ message: 'User already exists' });
+    }
+
+    const institution = await Institution.findById(managedInstitution);
+    if (!institution) {
+        return res.status(404).json({ message: 'Institution not found' });
+    }
+
+    const avatar = getRandomAvatar(displayName);
+    const user = await User.create({
+        displayName,
+        email,
+        password,
+        role: 'college_admin',
+        managedInstitution,
+        preferences: {
+            avatarUrl: avatar.url,
+            avatarSeed: avatar.seed,
+            hasConfirmedAvatar: false
+        }
+    });
+
+    if (user) {
+        res.status(201).json({
+            _id: user._id,
+            displayName: user.displayName,
+            email: user.email,
+            role: user.role,
+            managedInstitution: user.managedInstitution
+        });
+    } else {
+        res.status(400).json({ message: 'Invalid user data' });
+    }
+};
+
+// @desc    Update user role (Admin only)
+// @route   PUT /api/auth/users/:id/role
+// @access  Private/Admin
+const updateUserRole = async (req, res) => {
+    try {
+        const user = await User.findById(req.params.id);
+        if (!user) return res.status(404).json({ message: 'User not found' });
+
+        if (req.body.role !== undefined) {
+            if (user._id.toString() === req.user._id.toString()) {
+                return res.status(400).json({ message: 'You cannot change your own role' });
+            }
+            user.role = req.body.role;
+
+            // When promoting to counselor, create/update a Counselor profile document
+            if (req.body.role === 'counselor') {
+                const { experience, field, cityName, contactNumber, description, profileImage } = req.body.counselorProfile || {};
+                const counselorData = {
+                    name: user.displayName,
+                    email: user.email,
+                    experience: experience || '1+ Years',
+                    field: field || 'Engineering',
+                    cityName: cityName || 'Maharashtra',
+                    contactNumber: contactNumber || user.phoneNumber || '',
+                    description: description || `Expert educational counselor dedicated to helping students find their best path.`,
+                    profileImage: profileImage || user.preferences?.avatarUrl || undefined
+                };
+                // Upsert counselor record linked by email
+                await Counselor.findOneAndUpdate(
+                    { email: user.email },
+                    counselorData,
+                    { upsert: true, new: true, setDefaultsOnInsert: true }
+                );
+                console.log(`[Admin] Counselor profile created/updated for ${user.email}`);
+
+                // Automatically grant the Counselor Special subscription plan
+                user.subscription = {
+                    type: 'counselor',
+                    paymentId: 'ADMIN_GRANT',
+                    usage: user.subscription?.usage || { aiPrompts: 0, predictions: 0, exports: 0 }
+                };
+                console.log(`[Admin] Counselor subscription granted to ${user.email}`);
+            }
+
+            // When demoting from counselor back to student, reset subscription to free
+            if (req.body.role === 'student' && user.subscription?.type === 'counselor') {
+                user.subscription = {
+                    type: 'free',
+                    usage: { aiPrompts: 0, predictions: 0, exports: 0 }
+                };
+                console.log(`[Admin] Subscription reset to free for ${user.email}`);
+            }
+        }
+
+        if (req.body.documents !== undefined) {
+            user.documents = req.body.documents;
+
+            if (user.documentChecklist) {
+                for (const [docName, doc] of Object.entries(req.body.documents)) {
+                    if (doc && (doc.status === 'accepted' || doc.status === 'verified')) {
+                        user.documentChecklist.set(docName, true);
+                    }
+                }
+            } else {
+                user.documentChecklist = new Map();
+                for (const [docName, doc] of Object.entries(req.body.documents)) {
+                    if (doc && (doc.status === 'accepted' || doc.status === 'verified')) {
+                        user.documentChecklist.set(docName, true);
+                    }
+                }
+            }
+        }
+
+        const updatedUser = await user.save();
+
+        const { client: redis } = require('../config/redis');
+        await redis.del(`user_profile_${updatedUser._id}`);
+
+        if (req.io) {
+            console.log(`[Socket] Broadcasting real-time profile update to user: ${updatedUser._id}`);
+            req.io.to(updatedUser._id.toString()).emit('user:updated', updatedUser);
+            req.io.emit('student:document_updated', updatedUser);
+        }
+
+        res.json({
+            _id: updatedUser._id,
+            displayName: updatedUser.displayName,
+            role: updatedUser.role,
+            documents: updatedUser.documents,
+            documentChecklist: updatedUser.documentChecklist
+        });
+    } catch (error) {
+        console.error('[updateUserRole] Error:', error);
+        res.status(500).json({ message: error.message });
+    }
+};
+
+// @desc    Send OTP via WhatsApp (Placeholder)
+// @route   POST /api/auth/send-otp
+// @access  Private
+const sendOTP = async (req, res) => {
+    const { phoneNumber } = req.body;
+    const user = await User.findById(req.user._id);
+
+    if (user) {
+        const otp = Math.floor(1000 + Math.random() * 9000).toString(); // 4 digit OTP
+        user.phoneNumber = phoneNumber;
+        user.otp = otp;
+        await user.save();
+
+        // In a real app, send WhatsApp message here
+        console.log(`[WhatsApp] Sending code ${otp} to ${phoneNumber} from CollegeAdvisor (+91 9096655942)`);
+
+        res.json({ success: true, message: 'OTP sent successfully', otp }); // Returning OTP for testing convenience
+    } else {
+        res.status(404).json({ message: 'User not found' });
+    }
+};
+
+// @desc    Verify OTP
+// @route   POST /api/auth/verify-otp
+// @access  Private
+const verifyOTP = async (req, res) => {
+    const { otp } = req.body;
+    const user = await User.findById(req.user._id);
+
+    if (user) {
+        if (user.otp === otp) {
+            user.isVerified = true;
+            user.otp = null;
+            await user.save();
+            res.json({ success: true, message: 'User verified' });
+        } else {
+            res.status(400).json({ message: 'Invalid OTP' });
+        }
+    } else {
+        res.status(404).json({ message: 'User not found' });
+    }
+};
+
+// @desc    Get dashboard stats (Admin only)
+// @route   GET /api/auth/stats
+// @access  Private/Admin
+const getDashboardStats = async (req, res) => {
+    try {
+        const { category } = req.query;
+        let instFilter = {};
+
+        if (category) {
+            const upperCat = category.toUpperCase();
+            if (upperCat === 'ENGINEERING' || upperCat === 'MHTCET' || upperCat === 'MHTCET PCM') {
+                instFilter = {
+                    $or: [
+                        { category: /^Engineering$/i },
+                        { category: /^MHTCET$/i },
+                        { category: /^MHTCET PCM$/i },
+                        {
+                            $and: [
+                                { $or: [{ category: { $exists: false } }, { category: null }, { category: '' }] },
+                                { name: { $not: /Pharmacy|Pharma|Medical|Ayurvedic|B\.Pharm/i } }
+                            ]
+                        }
+                    ]
+                };
+            } else if (upperCat === 'PHARMACY' || upperCat === 'MHTCET PCB') {
+                instFilter = {
+                    $or: [
+                        { category: /Pharmacy/i },
+                        { category: /MHTCET PCB/i }
+                    ]
+                };
+            } else {
+                instFilter = { category: new RegExp(`^${category}$`, 'i') };
+            }
+        }
+
+        const userCount = await User.countDocuments();
+        const institutionCount = await Institution.countDocuments(instFilter);
+
+        // Detailed Analytics for Graphs (Last 7 Days)
+        const sevenDaysAgo = new Date();
+        sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+        const registrationsArr = await User.aggregate([
+            { $match: { createdAt: { $gte: sevenDaysAgo } } },
+            {
+                $group: {
+                    _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } },
+                    count: { $sum: 1 }
+                }
+            },
+            { $sort: { _id: 1 } }
+        ]);
+
+        const analytics = {
+            registrations: registrationsArr,
+            activeSessions: Math.floor(userCount * 0.45), // Simulated based on user base
+            predictionHits: [
+                { day: 'Mon', count: 12 + Math.floor(Math.random() * 5) },
+                { day: 'Tue', count: 19 + Math.floor(Math.random() * 5) },
+                { day: 'Wed', count: 15 + Math.floor(Math.random() * 5) },
+                { day: 'Thu', count: 22 + Math.floor(Math.random() * 5) },
+                { day: 'Fri', count: 30 + Math.floor(Math.random() * 5) },
+                { day: 'Sat', count: 25 + Math.floor(Math.random() * 5) },
+                { day: 'Sun', count: 35 + Math.floor(Math.random() * 5) }
+            ]
+        };
+
+        res.json({
+            users: userCount,
+            institutions: institutionCount,
+            analytics
+        });
+    } catch (error) {
+        res.status(500).json({ message: 'Failed to fetch stats' });
+    }
+};
+
+// @desc    Delete user account
+// @route   DELETE /api/auth/profile
+// @access  Private
+const deleteAccount = async (req, res) => {
+    try {
+        const user = await User.findById(req.user._id);
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        await User.findByIdAndDelete(req.user._id);
+        res.json({ success: true, message: 'Account deleted permanently' });
+    } catch (error) {
+        res.status(500).json({ message: 'Failed to delete account' });
+    }
+};
+
+// @desc    Delete any user account (Admin only)
+// @route   DELETE /api/auth/users/:id
+// @access  Private/Admin
+const deleteUser = async (req, res) => {
+    try {
+        const user = await User.findById(req.params.id);
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        await User.findByIdAndDelete(req.params.id);
+        res.json({ success: true, message: 'User permanent removed successfully' });
+    } catch (error) {
+        res.status(500).json({ message: 'Failed to delete user' });
+    }
+};
+
+const setVerifiedPhone = async (req, res) => {
+    try {
+        const { phone } = req.body;
+        if (!phone || phone.length < 10) return res.status(400).json({ message: 'Invalid phone number' });
+        const user = await User.findById(req.user._id);
+        user.phoneNumber = phone;
+        user.isVerified = true;
+        await user.save();
+        res.json({ success: true, user: { isVerified: true, phoneNumber: phone } });
+    } catch (error) {
+        res.status(500).json({ message: 'Failed to update phone' });
+    }
+};
+
+const updateFCMToken = async (req, res) => {
+    try {
+        const { fcmToken } = req.body;
+        const user = await User.findById(req.user._id);
+        if (user) {
+            user.fcmToken = fcmToken;
+            await user.save();
+            res.json({ success: true });
+        } else {
+            res.status(404).json({ message: 'User not found' });
+        }
+    } catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+};
+
+const removeFCMToken = async (req, res) => {
+    try {
+        const user = await User.findById(req.user._id);
+        if (user) {
+            user.fcmToken = null;
+            await user.save();
+            res.json({ success: true });
+        } else {
+            res.status(404).json({ message: 'User not found' });
+        }
+    } catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+};
+
+const getAdmins = async (req, res) => {
+    try {
+        const admins = await User.find({ role: { $in: ['admin', 'staff'] } })
+            .select('displayName email profilePicture _id role')
+            .sort('displayName');
+        res.json({ success: true, data: admins });
+    } catch (error) {
+        res.status(500).json({ success: false, message: 'Failed to fetch admins' });
+    }
+};
+
+const sendForgotPasswordOTP = async (req, res) => {
+    try {
+        const { email } = req.body;
+        if (!email) return res.status(400).json({ message: 'Email is required' });
+
+        const user = await User.findOne({ email });
+        if (!user) return res.status(404).json({ message: 'User with this email not found' });
+
+        const otp = Math.floor(100000 + Math.random() * 900000).toString(); // 6 digits
+
+        // Save OTP to DB for 10 minutes (TTL index handles expiration)
+        await OTP.findOneAndUpdate(
+            { email, purpose: 'forgot_password' },
+            { otp, createdAt: new Date() },
+            { upsert: true, returnDocument: 'after' }
+        );
+        console.log(`[Auth] Forgot Password OTP created/updated in DB for ${email}`);
+
+        await sendEmail({
+            email,
+            otp, // Pass OTP for template substitution
+            subject: 'Password Reset Code for CollegeAdvisor',
+            message: `Your password reset code is ${otp}. It will expire in 10 minutes.`,
+            html: `
+                <div style="font-family: sans-serif; padding: 20px; border: 1px solid #eee; border-radius: 10px;">
+                    <h2 style="color: #2563eb;">Password Reset Request</h2>
+                    <p>We received a request to reset your password. Use the following code to continue:</p>
+                    <div style="background: #f1f5f9; padding: 20px; text-align: center; font-size: 32px; font-weight: bold; letter-spacing: 5px; color: #1e293b; border-radius: 8px; margin: 20px 0;">
+                        ${otp}
+                    </div>
+                    <p style="color: #64748b; font-size: 14px;">This code will expire in 10 minutes. If you didn't request this, you can safely ignore this email.</p>
+                </div>
+            `
+        });
+
+        res.json({ success: true, message: 'Reset code sent to email' });
+    } catch (error) {
+        console.error('sendForgotPasswordOTP Error:', error);
+        res.status(500).json({ success: false, message: 'Failed to send reset code', error: error.message });
+    }
+};
+
+const resetPassword = async (req, res) => {
+    try {
+        const { email, otp, newPassword } = req.body;
+        if (!email || !otp || !newPassword) {
+            return res.status(400).json({ message: 'All fields are required' });
+        }
+
+        const otpDoc = await OTP.findOne({ email, purpose: 'forgot_password' });
+        const storedOtp = otpDoc ? otpDoc.otp : null;
+        
+        if (!storedOtp || String(storedOtp) !== String(otp)) {
+            console.log(`Reset failed: Stored OTP ${storedOtp} vs Received OTP ${otp} for ${email}`);
+            return res.status(400).json({ success: false, message: 'Invalid or expired OTP' });
+        }
+
+        const user = await User.findOne({ email });
+        if (!user) return res.status(404).json({ message: 'User not found' });
+
+        user.password = newPassword;
+        await user.save();
+
+        await OTP.deleteOne({ email, purpose: 'forgot_password' });
+
+        res.json({ success: true, message: 'Password reset successfully. You can now login.' });
+    } catch (error) {
+        res.status(500).json({ message: 'Failed to reset password' });
+    }
+};
+
+// @desc    Send OTP for new signup
+// @route   POST /api/auth/send-signup-otp
+// @access  Public
+const sendSignupOTP = async (req, res) => {
+    try {
+        const { email } = req.body;
+        if (!email) return res.status(400).json({ message: 'Email is required' });
+
+        const userExists = await User.findOne({ email });
+        if (userExists) return res.status(400).json({ message: 'User already registered' });
+
+        const otp = Math.floor(100000 + Math.random() * 900000).toString(); // 6 digits
+
+        // Save OTP to DB for 10 minutes
+        await OTP.findOneAndUpdate(
+            { email, purpose: 'signup' },
+            { otp, createdAt: new Date() },
+            { upsert: true, returnDocument: 'after' }
+        );
+        console.log(`[Auth] Signup OTP created/updated in DB for ${email}`);
+
+        await sendEmail({
+            email,
+            otp, // Pass OTP for template substitution
+            subject: 'Verification Code for CollegeAdvisor',
+            message: `Your verification code is ${otp}. It will expire in 10 minutes.`,
+            html: `
+                <div style="font-family: sans-serif; padding: 20px; border: 1px solid #eee; border-radius: 10px;">
+                    <h2 style="color: #2563eb;">Welcome to CollegeAdvisor!</h2>
+                    <p>To complete your registration, please use the following verification code:</p>
+                    <div style="background: #f1f5f9; padding: 20px; text-align: center; font-size: 32px; font-weight: bold; letter-spacing: 5px; color: #1e293b; border-radius: 8px; margin: 20px 0;">
+                        ${otp}
+                    </div>
+                    <p style="color: #64748b; font-size: 14px;">This code will expire in 10 minutes. If you didn't request this, please ignore this email.</p>
+                </div>
+            `
+        });
+
+        res.json({ success: true, message: 'OTP sent to email' });
+    } catch (error) {
+        console.error('sendSignupOTP Error:', error);
+        res.status(500).json({ success: false, message: 'Failed to send OTP', error: error.message });
+    }
+};
+
+// @desc    Verify OTP only (without registering)
+// @route   POST /api/auth/verify-only-otp
+// @access  Public
+const verifyOnlyOTP = async (req, res) => {
+    try {
+        const { email, otp } = req.body;
+        const otpDoc = await OTP.findOne({ email, purpose: 'signup' });
+        const storedOtp = otpDoc ? otpDoc.otp : null;
+
+        if (!storedOtp || storedOtp !== otp) {
+            return res.status(400).json({ success: false, message: 'Invalid or expired OTP' });
+        }
+        res.json({ success: true, message: 'OTP verified' });
+    } catch (error) {
+        res.status(500).json({ message: 'Verification failed' });
+    }
+};
+
+// @desc    Verify OTP and register user
+// @route   POST /api/auth/verify-signup-otp
+// @access  Public
+const verifyOTPAndRegister = async (req, res) => {
+    try {
+        const { displayName, email, password, phoneNumber, otp, role, examType } = req.body;
+        
+        const otpDoc = await OTP.findOne({ email, purpose: 'signup' });
+        const storedOtp = otpDoc ? otpDoc.otp : null;
+
+        if (!storedOtp || storedOtp !== otp) {
+            return res.status(400).json({ message: 'Invalid or expired OTP' });
+        }
+
+        // OTP verified, create user
+        const avatar = getRandomAvatar(displayName);
+        const user = await User.create({
+            displayName,
+            email,
+            password,
+            phoneNumber,
+            role: role || 'student',
+            examType,
+            preferences: {
+                avatarUrl: avatar.url,
+                avatarSeed: avatar.seed,
+                hasConfirmedAvatar: false
+            }
+        });
+
+        if (user) {
+            await OTP.deleteOne({ email, purpose: 'signup' });
+            
+            // Send welcome notification
+            setTimeout(() => {
+                const { sendNotification } = require('../services/notificationService');
+                sendNotification(user._id, `Welcome to CollegeAdvisor! 🎉`, "Your account is verified and ready.", "success");
+            }, 2000);
+
+            res.status(201).json({
+                token: generateToken(user._id),
+                _id: user._id,
+                displayName: user.displayName,
+                email: user.email,
+                phoneNumber: user.phoneNumber,
+                role: user.role,
+                preferences: user.preferences,
+                showAvatarPopup: true
+            });
+        }
+    } catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+};
+
+// @desc    Google Login
+// @route   POST /api/auth/google
+// @access  Public
+const googleLogin = async (req, res) => {
+    try {
+        const { idToken, accessToken } = req.body;
+        let googleId, email, name, picture;
+
+        if (idToken) {
+            const ticket = await googleClient.verifyIdToken({
+                idToken,
+                audience: process.env.GOOGLE_CLIENT_ID
+            });
+            const payload = ticket.getPayload();
+            googleId = payload.sub;
+            email = payload.email;
+            name = payload.name;
+            picture = payload.picture;
+        } else if (accessToken) {
+            const axios = require('axios');
+            const response = await axios.get('https://www.googleapis.com/oauth2/v3/userinfo', {
+                headers: { Authorization: `Bearer ${accessToken}` }
+            });
+            googleId = response.data.sub;
+            email = response.data.email;
+            name = response.data.name;
+            picture = response.data.picture;
+        } else {
+            return res.status(400).json({ message: 'No Google token provided' });
+        }
+
+        let user = await User.findOne({ $or: [{ googleId }, { email }] });
+        let isNewUser = false;
+
+        if (!user) {
+            // Create new user for Google Signup
+            const avatar = getRandomAvatar(name);
+            user = new User({
+                displayName: name,
+                email: email,
+                googleId: googleId,
+                role: 'student',
+                preferences: {
+                    avatarUrl: picture || avatar.url,
+                    avatarSeed: avatar.seed,
+                    hasConfirmedAvatar: false
+                }
+            });
+            await user.save();
+            isNewUser = true;
+        } else if (!user.googleId) {
+            // Link Google account to existing email user
+            user.googleId = googleId;
+            if (!user.preferences?.avatarUrl) {
+                user.preferences = {
+                    ...user.preferences,
+                    avatarUrl: picture
+                };
+            }
+            await user.save();
+        }
+
+        res.json({
+            _id: user._id,
+            displayName: user.displayName,
+            email: user.email,
+            role: user.role,
+            examType: user.examType,
+            percentile: user.percentile,
+            rank: user.rank,
+            location: user.location,
+            expectedRegion: user.expectedRegion,
+            bannerUrl: user.bannerUrl,
+            preferences: user.preferences,
+            savedColleges: (await user.populate('savedColleges', 'name location type feesPerYear rating dteCode galleryImages university category')).savedColleges || [],
+            savedPredictions: (await user.populate('savedPredictions.collegeId', 'name location dteCode category')).savedPredictions || [],
+            subscription: user.subscription,
+            phoneNumber: user.phoneNumber,
+            token: generateToken(user._id),
+            showAvatarPopup: !user.preferences?.hasConfirmedAvatar,
+            isNewUser: isNewUser
+        });
+    } catch (error) {
+        console.error(error);
+        res.status(401).json({ message: 'Google authentication failed' });
+    }
+};
+
+const getCollegeAdmins = async (req, res) => {
+    try {
+        const admins = await User.find({ role: 'college_admin' })
+            .populate('managedInstitution', 'name dteCode location')
+            .select('-password')
+            .sort('-createdAt');
+        res.json({ success: true, data: admins });
+    } catch (error) {
+        res.status(500).json({ success: false, message: 'Failed to fetch college admins' });
+    }
+};
+
+module.exports = {
+    registerUser,
+    loginUser,
+    getUserProfile,
+    updateUserProfile,
+    changePassword,
+    toggleSaveCollege,
+    getAllUsers,
+    getUserById,
+    updateUserRole,
+    sendOTP,
+    verifyOTP,
+    setVerifiedPhone,
+    getDashboardStats,
+    getAdmins,
+    deleteAccount,
+    deleteUser,
+    updateAvatarPreference,
+    toggleSavePrediction,
+    sendSignupOTP,
+    verifyOnlyOTP,
+    verifyOTPAndRegister,
+    googleLogin,
+    updateFCMToken,
+    removeFCMToken,
+    sendForgotPasswordOTP,
+    resetPassword,
+    registerCollegeAdmin,
+    getCollegeAdmins
+};

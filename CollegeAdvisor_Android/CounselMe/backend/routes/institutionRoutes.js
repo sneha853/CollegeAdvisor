@@ -1,0 +1,39 @@
+const express = require('express');
+const router = express.Router();
+const {
+    createInstitution,
+    parseInstitutionText,
+    getInstitutions,
+    getInstitutionDteCodes,
+    getInstitutionById,
+    updateInstitution,
+    deleteInstitution,
+    deleteBranch,
+    toggleFeatureInstitution,
+    getFeaturedInstitutions,
+    getManagedInstitution,
+    updateManagedInstitution
+} = require('../controllers/institutionController');
+const { protect, authorize } = require('../middleware/authMiddleware');
+
+router.route('/')
+    .get(getInstitutions)
+    .post(protect, authorize('admin'), createInstitution);
+
+router.get('/featured', getFeaturedInstitutions);
+router.get('/dte-codes', getInstitutionDteCodes);
+router.route('/managed')
+    .get(protect, authorize('college_admin'), getManagedInstitution)
+    .put(protect, authorize('college_admin'), updateManagedInstitution);
+router.post('/parse', protect, authorize('admin'), parseInstitutionText);
+
+router.delete('/:id/branch', protect, authorize('admin'), deleteBranch);
+
+router.put('/:id/feature', protect, authorize('admin'), toggleFeatureInstitution);
+
+router.route('/:id')
+    .get(getInstitutionById)
+    .put(protect, authorize('admin'), updateInstitution)
+    .delete(protect, authorize('admin'), deleteInstitution);
+
+module.exports = router;
